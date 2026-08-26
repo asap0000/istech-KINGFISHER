@@ -1,0 +1,180 @@
+name: Android Build
+
+on:
+  push:
+    branches: ["**"]
+    # Only build when the app (or this workflow) actually changes — README-only
+    # commits won't spend a run.
+    paths:
+      - "app/**"
+      - "gradle/**"
+      - "gradlew"
+      - "gradlew.bat"
+      - "*.gradle.kts"
+      - "gradle.properties"
+      - ".github/workflows/android.yml"
+  # 週次サーベイランス: push が無くても毎週月曜 09:00 JST (00:00 UTC) に main で
+  # ビルド+オフライン方針検査を実行し、Secrets 失効・環境変化などの
+  # 「静かな破損」を早期検知する(2026-07 の keystore 失効事案の再発防止)。
+  schedule:
+    - cron: "0 0 * * 1"
+  workflow_dispatch:
+
+# If you push several times quickly, cancel the older in-flight run on the same
+# branch so only the latest builds. Saves time and keeps things tidy.
+concurrency:
+  group: android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      # Release signing material, pulled from repository Secrets. When these are
+      # empty the release APK is built unsigned (the build still succeeds).
+      RELEASE_STORE_PASSWORD: ${{ secrets.RELEASE_STORE_PASSWORD }}
+      RELEASE_KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
+      RELEASE_KEY_PASSWORD: ${{ secrets.RELEASE_KEY_PASSWORD }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Fast, dependency-free static checks for this app's core safety guarantees
+      # (docs/2026-07-04_仕様_提出用出力機能.md P1-P4). Runs before the build so a
+      # violation fails in seconds, not minutes.
+      - name: Verify offline / no-share-intent / no-temp-file guarantees
+        run: |
+          set -e
+          if grep -q 'android.permission.INTERNET' app/src/main/AndroidManifest.xml; then
+            echo "::error::INTERNET permission must not be declared — this app's core promise is that it cannot send data off the device."
+            exit 1
+          fi
+          if grep -rlE 'ACTION_SEND|Intent\.createChooser|FileProvider' app/src/main/java/com/istech/privacycamera/print/ 2>/dev/null; then
+            echo "::error::The submission-print module must not use share intents or FileProvider (P3: single-purpose print output only)."
+            exit 1
+          fi
+          if grep -rlE 'cacheDir|filesDir|openFileOutput|\bFile\(' app/src/main/java/com/istech/privacycamera/print/ 2>/dev/null; then
+            echo "::error::The submission-print module must not create files in app storage (P4: the print framework's file descriptor is the only sink)."
+            exit 1
+          fi
+          echo "OK: no INTERNET permission; print module has no share-intent or temp-file paths."
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      # Caches Gradle dependencies & wrapper between runs -> much faster builds.
+      - name: Set up Gradle (with caching)
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install SDK packages
+        run: |
+          yes | sdkmanager "platform-tools" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      # 自動リグレッションテスト(JVM: Robolectric + Roborazzi + 自作Bitmapゴールデン)。
+      # ロジック検証に加え、基準画像(src/test/goldens, src/test/screenshots)との
+      # ピクセル比較で見た目の退行も検出する。基準画像の更新は record-goldens
+      # ワークフロー(workflow_dispatch)で行う。エミュレータ不要・毎push実行。
+      - name: Run unit & golden tests (Pro debug variant)
+        run: ./gradlew :app:verifyRoborazziProDebug --no-daemon --stacktrace
+
+      - name: Upload test reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            app/build/reports/tests
+            app/build/outputs/roborazzi
+          if-no-files-found: ignore
+          retention-days: 14
+
+      # 署名鍵は「暗号化した形でも」リポジトリに置かない。このリポジトリは PUBLIC であり、
+      # 一度公開した暗号文は fork・アーカイブ・第三者クローンへ恒久的に複製されて取り消せない
+      # ＝レート制限のないオフライン総当たりに永久に晒されることになる。鍵そのものを Secret に
+      # 置けば、公開される暗号文はゼロになる（復号パスフレーズ方式より攻撃面が小さい）。
+      - name: Restore release keystore
+        env:
+          RELEASE_KEYSTORE_BASE64: ${{ secrets.RELEASE_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$RELEASE_KEYSTORE_BASE64" ]; then
+            printf '%s' "$RELEASE_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "RELEASE_KEYSTORE_PATH=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "Release keystore restored — release APK will be signed."
+          else
+            echo "No RELEASE_KEYSTORE_BASE64 secret set — release APK will be UNSIGNED."
+          fi
+
+      - name: Build debug & release APKs
+        run: ./gradlew assembleDebug assembleRelease --no-daemon --stacktrace
+
+      # istech オフライン厳守の機械的担保 (1/2):
+      # この製品は機器連動を持たないため、INTERNET パーミッションの宣言自体を禁止する。
+      # 人間も Claude も見落とした場合に、ここで機械的に弾く。
+      # (lite/pro 両フレーバーの全 APK をグロブで検査する)
+      - name: Verify offline policy (no INTERNET permission)
+        run: |
+          AAPT="$ANDROID_HOME/build-tools/35.0.0/aapt"
+          checked=0
+          for apk in app/build/outputs/apk/*/debug/*.apk \
+                     app/build/outputs/apk/*/release/*.apk; do
+            [ -f "$apk" ] || continue
+            checked=1
+            if "$AAPT" dump permissions "$apk" | grep -q 'android.permission.INTERNET'; then
+              echo "::error::$apk requests android.permission.INTERNET — istech offline policy violation."
+              exit 1
+            fi
+            echo "OK: $apk does not request INTERNET permission."
+          done
+          if [ "$checked" -eq 0 ]; then
+            echo "::error::No APK found to verify."
+            exit 1
+          fi
+
+      # istech オフライン厳守の機械的担保 (2/2):
+      # HTTP クライアント等のネットワーク系ライブラリが依存ツリーに混入していないか検査する。
+      # (フレーバー導入後は releaseRuntimeClasspath がフレーバー別になる)
+      - name: Verify offline policy (no network libraries)
+        run: |
+          for cfg in liteReleaseRuntimeClasspath proReleaseRuntimeClasspath; do
+            ./gradlew -q :app:dependencies --configuration "$cfg" --no-daemon > "$RUNNER_TEMP/deps-$cfg.txt"
+            if grep -Ei 'okhttp|retrofit|ktor-client|volley|grpc|apache\.http|cronet' "$RUNNER_TEMP/deps-$cfg.txt"; then
+              echo "::error::Network library detected in $cfg — istech offline policy violation."
+              exit 1
+            fi
+            echo "OK: no known network libraries in $cfg."
+          done
+
+      - name: Upload debug APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug
+          # Both product flavors (lite/pro).
+          path: |
+            app/build/outputs/apk/lite/debug/app-lite-debug.apk
+            app/build/outputs/apk/pro/debug/app-pro-debug.apk
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload release APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release
+          # Picks up the signed app-<flavor>-release.apk when secrets are set,
+          # otherwise the app-<flavor>-release-unsigned.apk.
+          path: |
+            app/build/outputs/apk/lite/release/app-lite-release.apk
+            app/build/outputs/apk/lite/release/app-lite-release-unsigned.apk
+            app/build/outputs/apk/pro/release/app-pro-release.apk
+            app/build/outputs/apk/pro/release/app-pro-release-unsigned.apk
+          if-no-files-found: warn
+          retention-days: 14

@@ -1,0 +1,21 @@
+*.iml
+.gradle/
+.kotlin/
+/local.properties
+.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+app/build/
+
+# NEVER commit signing keys
+*.keystore
+*.jks
+keystore.properties
+
+# 署名鍵は暗号化した形でもコミットしない（PUBLIC リポジトリのため）
+*.gpg
+*.base64

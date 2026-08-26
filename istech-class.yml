@@ -1,0 +1,11 @@
+# istech ネットワーククラス宣言（制度定義 2026-07-08_制度定義_ネットワーククラス.md §7-2）
+# 単位＝資産（実行単位）。本リポジトリは :app 1 モジュール＝1 資産。
+class: corundum
+reason: >-
+  ネットワーク機能を持つコードが依存関係に一切ない（§7-1 の自己分類チェックで最初に YES）。
+  INTERNET 権限は宣言せず、通信系ライブラリはブラックリスト方式で混入を禁止する。
+verified_by:
+  # コランダム検査＝制度定義 §3 の「権限grep＋aapt検査＋依存grep」。実体は下記ワークフロー。
+  - .github/workflows/android.yml  # ソース権限grep / 出荷APKのaapt検査 / 依存ツリーの通信ライブラリ検査
+  - .github/workflows/release.yml  # 配布直前の最終ゲート（lite/pro 両フレーバーのaapt検査）
+allowlist_doc: null  # コランダムは allowlist を持たない（トパーズ以下の器）

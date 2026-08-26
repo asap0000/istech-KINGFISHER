@@ -1,0 +1,13 @@
+# テキストは LF で正規化する（開発は Windows・CI は Linux なので、
+# 明示しないと改行コードが混在して diff が読めなくなる）。
+* text=auto eol=lf
+
+# Windows でしか使わないもの
+*.bat text eol=crlf
+
+# バイナリ（基準画像は1バイトの変換も許されない＝ゴールデン比較が壊れる）
+*.png binary
+*.jpg binary
+*.jar binary
+*.keystore binary
+*.apk binary
