@@ -22,6 +22,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -40,8 +41,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Backup
-import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
@@ -53,10 +54,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -65,6 +66,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -76,10 +78,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -90,13 +95,13 @@ import com.istech.privacycamera.data.PhotoCategories
 import com.istech.privacycamera.data.PhotoItem
 import com.istech.privacycamera.data.PhotoSearch
 import com.istech.privacycamera.viewmodel.PhotoViewModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val ALL_FILTER = "すべて"
 
@@ -197,6 +202,7 @@ fun GalleryScreen(
     }
 
     val query by viewModel.query.collectAsState()
+    val exporting by viewModel.exporting.collectAsState()
 
     // The search box and the category filter narrow the same list, so picking a category and
     // then typing searches within it.
@@ -443,6 +449,13 @@ fun GalleryScreen(
             }
             }
         }
+    }
+
+    // Blocks the whole screen while a backup is written. Deliberately not dismissible: the
+    // export is the user's only route off this device, and walking away from it mid-write is
+    // what produced the broken, header-only files during beta.
+    if (exporting) {
+        BackupProgressOverlay()
     }
 
     if (showCategoryCleanup) {
@@ -818,4 +831,49 @@ private fun CategoryCleanupDialog(
             TextButton(onClick = onDismiss) { Text("閉じる") }
         }
     )
+}
+
+/**
+ * Full-screen "please wait" shown while a backup is being written.
+ *
+ * Three things at once: it states what is happening, it swallows every touch so the export
+ * cannot be navigated away from, and it holds the screen awake. The export itself survives
+ * regardless (it runs on the application scope), but keeping the user here means they see it
+ * finish rather than discovering later that it did not.
+ */
+@Composable
+private fun BackupProgressOverlay() {
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        view.keepScreenOn = true
+        onDispose { view.keepScreenOn = false }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(androidx.compose.ui.graphics.Color(0xF2000000))
+            // Consume every gesture: nothing underneath is reachable until this clears.
+            .pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent() } } },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            modifier = Modifier.padding(32.dp)
+        ) {
+            CircularProgressIndicator(color = androidx.compose.ui.graphics.Color.White)
+            Text(
+                "バックアップを書き出しています",
+                color = androidx.compose.ui.graphics.Color.White,
+                style = MaterialTheme.typography.titleMedium,
+                modifier = Modifier.padding(top = 24.dp)
+            )
+            Text(
+                "終わるまでこの画面のままお待ちください。\n途中で閉じると、復元できないファイルができてしまいます。",
+                color = androidx.compose.ui.graphics.Color(0xFFCCCCCC),
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+    }
 }

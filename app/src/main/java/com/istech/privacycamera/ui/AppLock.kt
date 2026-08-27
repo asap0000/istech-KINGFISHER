@@ -94,13 +94,17 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 // while our own auth prompt is up, since that prompt also pauses us and we
                 // must not re-lock underneath an in-progress reveal/unlock.
                 Lifecycle.Event.ON_PAUSE ->
-                    if (lockState == LockState.UNLOCKED && !BiometricGate.isPrompting) {
+                    if (lockState == LockState.UNLOCKED &&
+                        !BiometricGate.isPrompting &&
+                        !BackupGate.isRunning
+                    ) {
                         lockState = LockState.LOCKED
                     }
                 // Belt-and-suspenders for any path that stops without pausing first.
-                Lifecycle.Event.ON_STOP -> if (lockState == LockState.UNLOCKED) {
-                    lockState = LockState.LOCKED
-                }
+                Lifecycle.Event.ON_STOP ->
+                    if (lockState == LockState.UNLOCKED && !BackupGate.isRunning) {
+                        lockState = LockState.LOCKED
+                    }
                 else -> {}
             }
         }
@@ -114,6 +118,12 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
             lastInteraction = SystemClock.elapsedRealtime()
             while (true) {
                 delay(1_000)
+                // Waiting for a backup to finish is not idleness: the user has been told to
+                // wait, and locking here would hide the progress they are waiting on.
+                if (BackupGate.isRunning) {
+                    lastInteraction = SystemClock.elapsedRealtime()
+                    continue
+                }
                 if (SystemClock.elapsedRealtime() - lastInteraction >= AUTO_LOCK_MS) {
                     lockState = LockState.LOCKED
                     break

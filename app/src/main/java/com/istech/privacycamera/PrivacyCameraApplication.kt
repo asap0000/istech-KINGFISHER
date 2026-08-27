@@ -18,8 +18,23 @@ package com.istech.privacycamera
 import android.app.Application
 import com.istech.privacycamera.data.AppSettings
 import com.istech.privacycamera.data.SecurePhotoStore
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 class PrivacyCameraApplication : Application() {
     val photoStore: SecurePhotoStore by lazy { SecurePhotoStore(this) }
     val appSettings: AppSettings by lazy { AppSettings(this) }
+
+    /**
+     * Scope for work that must finish even if the screen that started it goes away.
+     *
+     * Writing a backup is the case that matters: it is the user's only route off this
+     * device, and a half-written one is worse than none — it looks like a backup until the
+     * day it is needed. Tying it to a ViewModel means leaving the screen kills it partway,
+     * which is exactly what appears to have happened during beta (three exports produced a
+     * 32-byte header-only file and left no log entry at all, because the coroutine died
+     * before reaching the logging step).
+     */
+    val backgroundScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 }

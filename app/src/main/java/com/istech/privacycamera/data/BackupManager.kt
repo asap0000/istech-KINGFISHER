@@ -115,7 +115,11 @@ object BackupManager {
             dos.writeInt(manifest.size)
             dos.write(manifest)
             for (item in exportable) {
-                val bytes = store.decryptOriginalBytes(item.id) ?: ByteArray(0)
+                // An original we cannot read must not be written as an empty entry: the
+                // export would report success while quietly producing a backup that restores
+                // that photo as nothing. Failing loudly here is the whole point of a backup.
+                val bytes = store.decryptOriginalBytes(item.id)
+                    ?: throw IllegalStateException("原本を読み出せませんでした（${item.id}）")
                 dos.writeInt(bytes.size)
                 dos.write(bytes)
             }

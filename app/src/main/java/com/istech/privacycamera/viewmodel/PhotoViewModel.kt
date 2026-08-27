@@ -18,6 +18,7 @@ package com.istech.privacycamera.viewmodel
 import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.istech.privacycamera.PrivacyCameraApplication
@@ -32,7 +33,9 @@ import com.istech.privacycamera.data.MaskingEngine
 import com.istech.privacycamera.data.PhotoCategories
 import com.istech.privacycamera.data.PhotoItem
 import com.istech.privacycamera.data.SecurePhotoStore
+import com.istech.privacycamera.ui.BackupGate
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -54,6 +57,10 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     /** Currently selected category filter (null = show all). */
     private val _selectedCategory = MutableStateFlow<String?>(null)
     val selectedCategory: StateFlow<String?> = _selectedCategory.asStateFlow()
+
+    /** True while a backup is being written; the UI blocks interaction until it clears. */
+    private val _exporting = MutableStateFlow(false)
+    val exporting: StateFlow<Boolean> = _exporting.asStateFlow()
 
     /** The free-text search box; blank means "not searching". */
     private val _query = MutableStateFlow("")
@@ -328,38 +335,68 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     fun exportBackup(uri: Uri, passphrase: CharArray, onResult: (Boolean) -> Unit) {
         val items = _photos.value
-        viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) {
+        _exporting.value = true
+        BackupGate.isRunning = true
+        // Runs on the application scope, not viewModelScope: leaving the screen must not kill
+        // a half-written backup. NonCancellable additionally guarantees the logging and the
+        // cleanup below happen even if the scope itself is being torn down — losing the log is
+        // how the beta failures became untraceable.
+        application.backgroundScope.launch {
+            val ok = withContext(NonCancellable) {
                 val resolver = getApplication<Application>().contentResolver
                 var written = -1
                 var verified = -1
+                var failure: String? = null
                 try {
                     resolver.openOutputStream(uri)?.use { out ->
                         written = BackupManager.export(out, items, store, passphrase)
-                    }
+                    } ?: run { failure = "書き出し先を開けませんでした" }
                     // Read the file straight back and confirm it decrypts, so a truncated or
                     // corrupt write is caught NOW rather than when the backup is finally
                     // needed (a silently-broken backup already bit us once).
                     if (written >= 0) {
                         resolver.openInputStream(uri)?.use { input ->
                             verified = BackupManager.verifyEncrypted(input, passphrase)
-                        }
+                        } ?: run { failure = "書き出したファイルを読み戻せませんでした" }
                     }
-                } catch (e: Exception) {
-                    // written/verified keep their failure markers
+                } catch (e: Throwable) {
+                    // Throwable, not Exception: running out of memory partway through is a
+                    // plausible way for a large export to die, and it must not escape silently.
+                    failure = "${e.javaClass.simpleName}: ${e.message ?: "詳細なし"}"
                 } finally {
                     passphrase.fill(' ')
                 }
                 val success = written >= 0 && verified == written
-                store.logAccess(
-                    "", AccessActions.BACKUP_EXPORT,
-                    if (success) "暗号化バックアップ $written 枚を書き出し・復元検証OK"
-                    else "書き出し/検証に失敗（書込 $written / 検証 $verified）"
-                )
+                if (!success) {
+                    // Never leave a file that looks like a backup but is not one. The beta
+                    // failures left a 32-byte header behind, indistinguishable from a real
+                    // backup in the file manager until the day it was needed.
+                    val removed = deleteDocumentQuietly(uri)
+                    store.logAccess(
+                        "", AccessActions.BACKUP_EXPORT,
+                        "書き出しに失敗（書込 $written / 検証 $verified" +
+                            (failure?.let { " / $it" } ?: "") +
+                            "）。壊れたファイルは" + (if (removed) "削除しました" else "削除できませんでした") + "。"
+                    )
+                } else {
+                    store.logAccess(
+                        "", AccessActions.BACKUP_EXPORT,
+                        "暗号化バックアップ $written 枚を書き出し・復元検証OK"
+                    )
+                }
                 success
             }
+            BackupGate.isRunning = false
+            _exporting.value = false
             onResult(ok)
         }
+    }
+
+    /** Removes a failed export so a broken file is never mistaken for a usable backup. */
+    private fun deleteDocumentQuietly(uri: Uri): Boolean = try {
+        DocumentsContract.deleteDocument(getApplication<Application>().contentResolver, uri)
+    } catch (e: Exception) {
+        false
     }
 
     /**
