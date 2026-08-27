@@ -41,7 +41,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Backup
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -54,6 +56,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -82,8 +85,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.istech.privacycamera.Tier
 import com.istech.privacycamera.data.BackupManager
+import com.istech.privacycamera.data.CategoryCatalog
 import com.istech.privacycamera.data.PhotoCategories
 import com.istech.privacycamera.data.PhotoItem
+import com.istech.privacycamera.data.PhotoSearch
 import com.istech.privacycamera.viewmodel.PhotoViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -191,15 +196,20 @@ fun GalleryScreen(
         if (uri != null) pendingRestoreUri = uri
     }
 
-    val visiblePhotos = remember(photos, selectedCategory) {
-        if (selectedCategory == null) photos
-        else photos.filter { it.category == selectedCategory }
+    val query by viewModel.query.collectAsState()
+
+    // The search box and the category filter narrow the same list, so picking a category and
+    // then typing searches within it.
+    val visiblePhotos = remember(photos, selectedCategory, query) {
+        PhotoSearch.filter(photos, query, selectedCategory)
     }
 
-    // Categories that actually have photos, plus their counts, for the drawer.
-    val categoryCounts = remember(photos) {
-        photos.groupingBy { it.category }.eachCount()
+    // Categories that actually have photos, plus their counts, for the drawer. The trash is
+    // counted too: a restore brings those photos back, so their category is still spoken for.
+    val categoryCounts = remember(photos, trash) {
+        (photos + trash).groupingBy { it.category }.eachCount()
     }
+    var showCategoryCleanup by remember { mutableStateOf(false) }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -237,6 +247,16 @@ fun GalleryScreen(
                         modifier = Modifier.padding(horizontal = 12.dp)
                     )
                 }
+
+                NavigationDrawerItem(
+                    label = { Text("カテゴリを整理") },
+                    selected = false,
+                    onClick = {
+                        showCategoryCleanup = true
+                        scope.launch { drawerState.close() }
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
 
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 NavigationDrawerItem(
@@ -364,29 +384,57 @@ fun GalleryScreen(
                 )
             }
         ) { padding ->
+            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { viewModel.setQuery(it) },
+                label = { Text("メモ・カテゴリを検索") },
+                singleLine = true,
+                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                trailingIcon = {
+                    if (query.isNotEmpty()) {
+                        IconButton(onClick = { viewModel.setQuery("") }) {
+                            Icon(Icons.Filled.Close, contentDescription = "検索をやめる")
+                        }
+                    }
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+            )
             if (visiblePhotos.isEmpty()) {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding),
+                    modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
-                    Text("写真がありません", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        if (query.isNotEmpty()) "「$query」に当てはまる写真はありません"
+                        else "写真がありません",
+                        style = MaterialTheme.typography.bodyLarge
+                    )
                 }
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(minSize = 150.dp),
                     contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding)
+                    modifier = Modifier.fillMaxSize()
                 ) {
                     items(visiblePhotos, key = { it.id }) { item ->
                         PhotoCard(item = item, onClick = { onOpenPhoto(item.id) })
                     }
                 }
             }
+            }
         }
+    }
+
+    if (showCategoryCleanup) {
+        CategoryCleanupDialog(
+            categories = categories,
+            usage = categoryCounts,
+            onRemove = { viewModel.removeCategory(it) },
+            onDismiss = { showCategoryCleanup = false }
+        )
     }
 
     if (showExportDialog) {
@@ -687,4 +735,70 @@ private fun decodeSampled(file: File, reqSize: Int): ImageBitmap? {
     while (largest / sample > reqSize) sample *= 2
     val opts = BitmapFactory.Options().apply { inSampleSize = sample }
     return BitmapFactory.decodeFile(file.path, opts)?.asImageBitmap()
+}
+
+/**
+ * Lets the user take unused categories out of the picker.
+ *
+ * Only categories with no photos can go. One that is still in use stays and says how many
+ * photos hold it — removing it would leave those photos carrying a name that no longer
+ * appears anywhere, so they could not be filtered for. Built-ins are permanent.
+ *
+ * Nothing here touches a photo: this is the picker's contents, not the photos' categories.
+ */
+@Composable
+private fun CategoryCleanupDialog(
+    categories: List<String>,
+    usage: Map<String, Int>,
+    onRemove: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val removable = categories.filter { CategoryCatalog.isRemovable(it, usage[it] ?: 0) }
+    val keptInUse = categories.filter {
+        !PhotoCategories.isBuiltIn(it) && (usage[it] ?: 0) > 0
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("カテゴリを整理") },
+        text = {
+            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                if (removable.isEmpty() && keptInUse.isEmpty()) {
+                    Text("自分で作ったカテゴリはまだありません。")
+                } else {
+                    if (removable.isNotEmpty()) {
+                        Text(
+                            "使っていないカテゴリ（写真は変わりません）",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        removable.forEach { name ->
+                            ListItem(
+                                headlineContent = { Text(name) },
+                                supportingContent = { Text("0件") },
+                                trailingContent = {
+                                    TextButton(onClick = { onRemove(name) }) { Text("外す") }
+                                }
+                            )
+                        }
+                    }
+                    if (keptInUse.isNotEmpty()) {
+                        HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                        Text(
+                            "使っているカテゴリ（外すには先に写真を移します）",
+                            style = MaterialTheme.typography.labelLarge
+                        )
+                        keptInUse.forEach { name ->
+                            ListItem(
+                                headlineContent = { Text(name) },
+                                supportingContent = { Text("${usage[name] ?: 0}件") }
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("閉じる") }
+        }
+    )
 }

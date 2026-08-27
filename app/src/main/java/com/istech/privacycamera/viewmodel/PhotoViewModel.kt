@@ -27,14 +27,18 @@ import com.istech.privacycamera.data.AccessEntry
 import com.istech.privacycamera.data.AppSettings
 import com.istech.privacycamera.data.ArchivedMonth
 import com.istech.privacycamera.data.BackupManager
+import com.istech.privacycamera.data.CategoryCatalog
 import com.istech.privacycamera.data.MaskingEngine
 import com.istech.privacycamera.data.PhotoCategories
 import com.istech.privacycamera.data.PhotoItem
 import com.istech.privacycamera.data.SecurePhotoStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -51,19 +55,42 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     private val _selectedCategory = MutableStateFlow<String?>(null)
     val selectedCategory: StateFlow<String?> = _selectedCategory.asStateFlow()
 
-    /** All selectable categories: built-in + user-defined + 未分類 (last). */
-    private val _categories = MutableStateFlow(
-        PhotoCategories.PREDEFINED + PhotoCategories.UNCLASSIFIED
-    )
-    val categories: StateFlow<List<String>> = _categories.asStateFlow()
+    /** The free-text search box; blank means "not searching". */
+    private val _query = MutableStateFlow("")
+    val query: StateFlow<String> = _query.asStateFlow()
+
+    /** Soft-deleted photos awaiting restore or expiry, most-recently-deleted first. */
+    private val _trash = MutableStateFlow<List<PhotoItem>>(emptyList())
+    val trash: StateFlow<List<PhotoItem>> = _trash.asStateFlow()
+
+    /** Categories the user has defined, as stored on disk. */
+    private val _customCategories = MutableStateFlow<List<String>>(emptyList())
+
+    /**
+     * All selectable categories.
+     *
+     * Derived rather than stored, so it cannot drift from the photos: any category written
+     * on a photo (including one in the trash) is always offered, even if it is missing from
+     * the stored list. That covers both a restored backup — which carries per-photo
+     * categories but not the catalogue file — and a category the user has taken out of the
+     * picker while photos still use it.
+     */
+    val categories: StateFlow<List<String>> =
+        combine(_customCategories, _photos, _trash) { custom, photos, trash ->
+            CategoryCatalog.build(
+                custom = custom,
+                usedOnPhotos = photos.map { it.category } + trash.map { it.category }
+            )
+        }.stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.Eagerly,
+            initialValue = PhotoCategories.PREDEFINED + PhotoCategories.UNCLASSIFIED
+        )
 
     /** How many photos have ever been imported via the Lite-migration path (cap basis). */
     private val _importedMigrationCount = MutableStateFlow(0)
     val importedMigrationCount: StateFlow<Int> = _importedMigrationCount.asStateFlow()
 
-    /** Soft-deleted photos awaiting restore or expiry, most-recently-deleted first. */
-    private val _trash = MutableStateFlow<List<PhotoItem>>(emptyList())
-    val trash: StateFlow<List<PhotoItem>> = _trash.asStateFlow()
 
     init {
         refresh()
@@ -74,10 +101,42 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun reloadCategories() {
         viewModelScope.launch {
-            val custom = withContext(Dispatchers.IO) { store.loadCustomCategories() }
-            _categories.value =
-                PhotoCategories.PREDEFINED + custom + PhotoCategories.UNCLASSIFIED
+            _customCategories.value = withContext(Dispatchers.IO) { store.loadCustomCategories() }
         }
+    }
+
+    /** Sets the search text. Blank clears the search. */
+    fun setQuery(text: String) {
+        _query.value = text
+    }
+
+    /**
+     * How many photos carry each category, trash included.
+     *
+     * The trash counts because a restore would otherwise resurrect a photo whose category
+     * had been removed in the meantime, leaving it unfilterable.
+     */
+    fun categoryUsage(): Map<String, Int> {
+        val counts = mutableMapOf<String, Int>()
+        (_photos.value + _trash.value).forEach { item ->
+            counts[item.category] = (counts[item.category] ?: 0) + 1
+        }
+        return counts
+    }
+
+    /**
+     * Takes a category out of the picker. Refuses while photos still use it — those photos
+     * would keep the name but no longer be filterable, so the user is asked to move them
+     * first. Returns true when the category was actually removed.
+     */
+    fun removeCategory(name: String): Boolean {
+        if (!CategoryCatalog.isRemovable(name, categoryUsage()[name] ?: 0)) return false
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.removeCustomCategory(name) }
+            reloadCategories()
+            if (_selectedCategory.value == name) _selectedCategory.value = null
+        }
+        return true
     }
 
     fun addCategory(name: String) {

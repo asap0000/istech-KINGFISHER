@@ -89,6 +89,9 @@ class SecurePhotoStore(private val context: Context) {
         // Defence in depth: even though internal storage is never media-scanned,
         // drop a .nomedia marker so nothing here is ever indexed.
         File(baseDir, ".nomedia").takeIf { !it.exists() }?.createNewFile()
+        // Bring any plaintext metadata from an older install up to the encrypted form.
+        // No-op once everything is converted, so it is safe to run on every construction.
+        migrateMetaToEncrypted()
     }
 
     /**
@@ -210,7 +213,7 @@ class SecurePhotoStore(private val context: Context) {
         readMeta(id)?.let { meta ->
             if (meta.has("mask")) {
                 meta.remove("mask")
-                File(metaDir, "$id.json").writeText(meta.toString())
+                writeMetaIn(metaDir, id, meta)
             }
         }
     }
@@ -247,7 +250,7 @@ class SecurePhotoStore(private val context: Context) {
         masked.recycle()
         val meta = readMeta(id) ?: JSONObject()
         meta.put("mask", MaskingEngine.specToJson(spec))
-        File(metaDir, "$id.json").writeText(meta.toString())
+        writeMetaIn(metaDir, id, meta)
         return true
     }
 
@@ -270,7 +273,9 @@ class SecurePhotoStore(private val context: Context) {
         // Tombstone the uuid so a later backup restore won't resurrect this photo here.
         addDeletedUuid(meta.optString("uuid", ""))
         meta.put("deletedAt", deletedAt)
-        File(trashMetaDir, "$id.json").writeText(meta.toString())
+        writeMetaIn(trashMetaDir, id, meta)
+        // Both forms go: the encrypted record and any plaintext one an older install left.
+        File(metaDir, "$id.enc").delete()
         File(metaDir, "$id.json").delete()
     }
 
@@ -303,7 +308,8 @@ class SecurePhotoStore(private val context: Context) {
         // The photo is back in the library, so lift its tombstone.
         removeDeletedUuid(meta.optString("uuid", ""))
         meta.remove("deletedAt")
-        File(metaDir, "$id.json").writeText(meta.toString())
+        writeMetaIn(metaDir, id, meta)
+        File(trashMetaDir, "$id.enc").delete()
         File(trashMetaDir, "$id.json").delete()
     }
 
@@ -311,6 +317,7 @@ class SecurePhotoStore(private val context: Context) {
     fun purge(id: String) {
         File(trashOriginalsDir, "$id.enc").delete()
         File(trashMaskedDir, "$id.jpg").delete()
+        File(trashMetaDir, "$id.enc").delete()
         File(trashMetaDir, "$id.json").delete()
     }
 
@@ -330,15 +337,7 @@ class SecurePhotoStore(private val context: Context) {
         }
     }
 
-    private fun readTrashMeta(id: String): JSONObject? {
-        val f = File(trashMetaDir, "$id.json")
-        if (!f.exists()) return null
-        return try {
-            JSONObject(f.readText())
-        } catch (e: Exception) {
-            null
-        }
-    }
+    private fun readTrashMeta(id: String): JSONObject? = readMetaIn(trashMetaDir, id)
 
     /** Moves [from] to [to], falling back to copy+delete across filesystem boundaries. */
     private fun move(from: File, to: File) {
@@ -443,6 +442,23 @@ class SecurePhotoStore(private val context: Context) {
         } catch (e: Exception) {
             emptyList()
         }
+    }
+
+    /**
+     * Removes a user-defined category from the picker.
+     *
+     * Only the catalogue entry goes: photos keep whatever category name is written on them.
+     * That is why the caller must check the name is unused first — [CategoryCatalog.build]
+     * would otherwise put it straight back (a category in use is always offered).
+     */
+    fun removeCustomCategory(name: String) {
+        val trimmed = name.trim()
+        if (trimmed.isEmpty() || PhotoCategories.isBuiltIn(trimmed)) return
+        val current = loadCustomCategories().toMutableList()
+        if (!current.remove(trimmed)) return
+        val arr = JSONArray()
+        current.forEach { arr.put(it) }
+        categoriesFile.writeText(arr.toString())
     }
 
     /** Adds a new custom category if it is non-blank and not already known. */
@@ -615,8 +631,28 @@ class SecurePhotoStore(private val context: Context) {
         return "%04d-%02d".format(cal.get(java.util.Calendar.YEAR), cal.get(java.util.Calendar.MONTH) + 1)
     }
 
-    private fun readMeta(id: String): JSONObject? {
-        val f = File(metaDir, "$id.json")
+    private fun readMeta(id: String): JSONObject? = readMetaIn(metaDir, id)
+
+    /**
+     * Reads one metadata record, preferring the encrypted form and falling back to the
+     * plaintext file left by an older install (see [migrateMetaToEncrypted]).
+     */
+    private fun readMetaIn(dir: File, id: String): JSONObject? {
+        val enc = File(dir, "$id.enc")
+        if (enc.exists()) {
+            return try {
+                JSONObject(String(CryptoManager.decrypt(enc.readBytes()), Charsets.UTF_8))
+            } catch (e: Exception) {
+                // A record we cannot decrypt is not a reason to lose the photo: fall through
+                // to the legacy file if one is still there, otherwise report "no metadata".
+                readLegacyMeta(dir, id)
+            }
+        }
+        return readLegacyMeta(dir, id)
+    }
+
+    private fun readLegacyMeta(dir: File, id: String): JSONObject? {
+        val f = File(dir, "$id.json")
         if (!f.exists()) return null
         return try {
             JSONObject(f.readText())
@@ -659,7 +695,50 @@ class SecurePhotoStore(private val context: Context) {
             put("category", category)
             put("createdAt", createdAt)
         }
-        File(metaDir, "$id.json").writeText(json.toString())
+        writeMetaIn(metaDir, id, json)
+    }
+
+    /**
+     * Writes one metadata record encrypted, then drops any plaintext predecessor.
+     *
+     * The write is staged through a temporary file and renamed, so a crash mid-write cannot
+     * leave a truncated record where a readable one used to be. The plaintext file is only
+     * deleted once the encrypted one is in place.
+     */
+    private fun writeMetaIn(dir: File, id: String, json: JSONObject) {
+        val target = File(dir, "$id.enc")
+        val tmp = File(dir, "$id.enc.tmp")
+        tmp.writeBytes(CryptoManager.encrypt(json.toString().toByteArray(Charsets.UTF_8)))
+        if (!tmp.renameTo(target)) {
+            target.writeBytes(tmp.readBytes())
+            tmp.delete()
+        }
+        File(dir, "$id.json").delete()
+    }
+
+    /**
+     * One-time move of metadata from plaintext JSON to the encrypted form.
+     *
+     * The originals and the access log were already encrypted at rest; the memo and category
+     * were not, even though a memo like "母のマイナンバー 表面" describes the very thing the
+     * original is encrypted to protect. This closes that gap for installs that predate it.
+     *
+     * Failures are deliberately survivable: anything that cannot be converted keeps its
+     * plaintext file and is retried on the next launch, so a bad record can never cost the
+     * user their metadata. (Same shape as the access-log migration above.)
+     */
+    private fun migrateMetaToEncrypted() {
+        listOf(metaDir, trashMetaDir).forEach { dir ->
+            dir.listFiles { f -> f.extension == "json" }?.forEach { legacy ->
+                val id = legacy.nameWithoutExtension
+                try {
+                    val json = JSONObject(legacy.readText())
+                    writeMetaIn(dir, id, json) // deletes the plaintext once the .enc lands
+                } catch (e: Exception) {
+                    // Leave the plaintext in place; the next launch tries again.
+                }
+            }
+        }
     }
 
     companion object {
