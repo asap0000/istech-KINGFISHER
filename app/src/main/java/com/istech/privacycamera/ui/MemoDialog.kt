@@ -116,10 +116,15 @@ fun MemoDialog(
                             label = { Text(c) }
                         )
                     }
-                    if (!showAll && foldedCategories.isNotEmpty()) {
+                    if (foldedCategories.isNotEmpty()) {
                         AssistChip(
-                            onClick = { showAll = true },
-                            label = { Text("ほかのカテゴリ (${foldedCategories.size})") }
+                            onClick = { showAll = !showAll },
+                            label = {
+                                Text(
+                                    if (showAll) "畳む"
+                                    else "ほかのカテゴリ (${foldedCategories.size})"
+                                )
+                            }
                         )
                     }
                 }
@@ -130,7 +135,11 @@ fun MemoDialog(
                 ) {
                     OutlinedTextField(
                         value = newCategory,
-                        onValueChange = { newCategory = it },
+                        // Capped because the name is echoed in the confirm button; without a
+                        // limit a pasted paragraph pushes "スキップ" off the dialog.
+                        onValueChange = {
+                            newCategory = it.take(CategoryCatalog.MAX_NAME_LENGTH)
+                        },
                         label = { Text("新しいカテゴリを追加") },
                         singleLine = true,
                         modifier = Modifier.weight(1f)

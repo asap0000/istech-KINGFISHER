@@ -36,8 +36,21 @@ package com.istech.privacycamera.data
  */
 object CategoryCatalog {
 
-    /** How many category chips are shown before the rest are folded into "ほかのカテゴリ". */
-    const val MAX_VISIBLE = 7
+    /**
+     * How many category chips are shown before the rest fold into "ほかのカテゴリ".
+     *
+     * Sized so that everything shipped with the app — the seven built-ins plus 未分類 — fits,
+     * which means folding only ever starts once the user has added a category of their own.
+     * At seven, a brand-new install would already show "ほかのカテゴリ (1)" hiding 「その他」,
+     * which is the opposite of what a cap for crowding is for.
+     */
+    val MAX_VISIBLE = PhotoCategories.PREDEFINED.size + 1
+
+    /**
+     * Longest category name accepted. Names are echoed inside the confirm button
+     * ("「祖母」を作って保存"), so an unbounded one would push the dialog's buttons apart.
+     */
+    const val MAX_NAME_LENGTH = 20
 
     /**
      * The full ordered catalogue: built-ins, then user-defined, then any category found on
@@ -79,10 +92,13 @@ object CategoryCatalog {
         val folded = all.drop(limit).toMutableList()
         if (selected != null && selected in folded) {
             // Swap the selected one into view, dropping the last visible entry instead.
+            // The displaced entry goes back where it came from in the original order, so the
+            // folded list stays in the same sequence the user saw before.
             folded.remove(selected)
             val displaced = visible.removeAt(visible.size - 1)
             visible.add(selected)
-            folded.add(0, displaced)
+            val insertAt = folded.indexOfFirst { all.indexOf(it) > all.indexOf(displaced) }
+            if (insertAt < 0) folded.add(displaced) else folded.add(insertAt, displaced)
         }
         return visible to folded
     }

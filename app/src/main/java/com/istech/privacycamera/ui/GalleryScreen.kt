@@ -204,9 +204,16 @@ fun GalleryScreen(
         PhotoSearch.filter(photos, query, selectedCategory)
     }
 
-    // Categories that actually have photos, plus their counts, for the drawer. The trash is
-    // counted too: a restore brings those photos back, so their category is still spoken for.
-    val categoryCounts = remember(photos, trash) {
+    // Two different questions, so two different counts.
+    // The drawer shows how many photos a filter will actually produce, so it counts only the
+    // live library — showing a trash-inclusive number next to a filter that ignores the trash
+    // reads as "photos are missing".
+    val liveCounts = remember(photos) {
+        photos.groupingBy { it.category }.eachCount()
+    }
+    // Whether a category may be retired counts the trash too: restoring a photo would
+    // otherwise bring back a category name that no longer exists anywhere.
+    val usageCounts = remember(photos, trash) {
         (photos + trash).groupingBy { it.category }.eachCount()
     }
     var showCategoryCleanup by remember { mutableStateOf(false) }
@@ -236,7 +243,7 @@ fun GalleryScreen(
                 )
                 // Show every category (built-in + user-added), with photo counts.
                 categories.forEach { category ->
-                    val count = categoryCounts[category] ?: 0
+                    val count = liveCounts[category] ?: 0
                     NavigationDrawerItem(
                         label = { Text("$category ($count)") },
                         selected = selectedCategory == category,
@@ -385,6 +392,8 @@ fun GalleryScreen(
             }
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            // No point offering a search box before there is anything to search.
+            if (photos.isNotEmpty()) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { viewModel.setQuery(it) },
@@ -402,14 +411,22 @@ fun GalleryScreen(
                     .fillMaxWidth()
                     .padding(horizontal = 12.dp, vertical = 8.dp)
             )
+            }
             if (visiblePhotos.isEmpty()) {
                 Box(
                     modifier = Modifier.fillMaxSize(),
                     contentAlignment = Alignment.Center
                 ) {
+                    // Say which of the two narrowings produced nothing, otherwise an empty
+                    // category reads as "the library is empty".
                     Text(
-                        if (query.isNotEmpty()) "「$query」に当てはまる写真はありません"
-                        else "写真がありません",
+                        when {
+                            query.isNotEmpty() && selectedCategory != null ->
+                                "「$selectedCategory」の中に「$query」に当てはまる写真はありません"
+                            query.isNotEmpty() -> "「$query」に当てはまる写真はありません"
+                            selectedCategory != null -> "「$selectedCategory」の写真はまだありません"
+                            else -> "写真がありません"
+                        },
                         style = MaterialTheme.typography.bodyLarge
                     )
                 }
@@ -431,7 +448,7 @@ fun GalleryScreen(
     if (showCategoryCleanup) {
         CategoryCleanupDialog(
             categories = categories,
-            usage = categoryCounts,
+            usage = usageCounts,
             onRemove = { viewModel.removeCategory(it) },
             onDismiss = { showCategoryCleanup = false }
         )

@@ -93,6 +93,16 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
 
     init {
+        // The plaintext -> encrypted migration touches every stored record and each record costs
+        // a Keystore round trip, so it must not run on the main thread: a Pro library with
+        // hundreds of photos would block the first frame long enough to ANR. Reads fall back
+        // to the plaintext form while it is in flight, so starting it alongside the first
+        // load is safe.
+        viewModelScope.launch {
+            withContext(Dispatchers.IO) { store.migratePlaintextToEncrypted() }
+            refresh()
+            reloadCategories()
+        }
         refresh()
         reloadCategories()
         refreshTrash() // also purges anything past its 30-day window

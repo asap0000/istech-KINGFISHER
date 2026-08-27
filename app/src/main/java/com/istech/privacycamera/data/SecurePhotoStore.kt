@@ -58,7 +58,17 @@ data class PhotoItem(
  *   filesDir/secure/masked/<id>.jpg      -> masked (mosaic) preview, safe to display
  *   filesDir/secure/meta/<id>.json       -> { caption, category, createdAt }
  */
-class SecurePhotoStore(private val context: Context) {
+class SecurePhotoStore(
+    private val context: Context,
+    /**
+     * How bytes are protected on disk. Defaults to the AndroidKeyStore-backed implementation,
+     * which is the only thing production ever uses — the seam exists because AndroidKeyStore
+     * is unavailable off-device, and the metadata migration is the part of this class most
+     * capable of losing a user's memos if it is wrong. Testing it beats leaving it unproven.
+     */
+    private val encryptBytes: (ByteArray) -> ByteArray = CryptoManager::encrypt,
+    private val decryptBytes: (ByteArray) -> ByteArray = CryptoManager::decrypt
+) {
 
     private val baseDir = File(context.filesDir, "secure").apply { mkdirs() }
     private val originalsDir = File(baseDir, "originals").apply { mkdirs() }
@@ -70,7 +80,10 @@ class SecurePhotoStore(private val context: Context) {
     private val trashOriginalsDir = File(trashDir, "originals").apply { mkdirs() }
     private val trashMaskedDir = File(trashDir, "masked").apply { mkdirs() }
     private val trashMetaDir = File(trashDir, "meta").apply { mkdirs() }
-    private val categoriesFile = File(baseDir, "categories.json")
+    // User-defined category names are the same kind of text as a memo — "祖母", "離婚調停" —
+    // so they get the same protection. The plaintext file is read once, then migrated away.
+    private val categoriesFile = File(baseDir, "categories.enc")
+    private val legacyCategoriesFile = File(baseDir, "categories.json")
     // Detail access log: encrypted, append-only JSON array of recent AccessEntry rows.
     private val accessLogFile = File(baseDir, "access_log.enc")
     // Pre-encryption format (plaintext JSON). Only read once, to migrate into accessLogFile.
@@ -89,9 +102,6 @@ class SecurePhotoStore(private val context: Context) {
         // Defence in depth: even though internal storage is never media-scanned,
         // drop a .nomedia marker so nothing here is ever indexed.
         File(baseDir, ".nomedia").takeIf { !it.exists() }?.createNewFile()
-        // Bring any plaintext metadata from an older install up to the encrypted form.
-        // No-op once everything is converted, so it is safe to run on every construction.
-        migrateMetaToEncrypted()
     }
 
     /**
@@ -136,7 +146,7 @@ class SecurePhotoStore(private val context: Context) {
             ?: throw IllegalArgumentException("Not a decodable image")
         val id = newId()
 
-        File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
+        File(originalsDir, "$id.enc").writeBytes(encryptBytes(jpegBytes))
 
         val masked = MaskingEngine.mask(source)
         val maskedFile = File(maskedDir, "$id.jpg")
@@ -202,7 +212,7 @@ class SecurePhotoStore(private val context: Context) {
      * back to the safe whole-frame mosaic (over-masks rather than under-masks).
      */
     fun replaceOriginal(id: String, jpegBytes: ByteArray) {
-        File(originalsDir, "$id.enc").writeBytes(CryptoManager.encrypt(jpegBytes))
+        File(originalsDir, "$id.enc").writeBytes(encryptBytes(jpegBytes))
         val src = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
         val masked = MaskingEngine.mask(src)
         File(maskedDir, "$id.jpg").outputStream().use { out ->
@@ -222,7 +232,7 @@ class SecurePhotoStore(private val context: Context) {
     fun decryptOriginal(id: String): Bitmap? {
         val enc = File(originalsDir, "$id.enc")
         if (!enc.exists()) return null
-        val plain = CryptoManager.decrypt(enc.readBytes())
+        val plain = decryptBytes(enc.readBytes())
         return BitmapFactory.decodeByteArray(plain, 0, plain.size)
     }
 
@@ -258,7 +268,7 @@ class SecurePhotoStore(private val context: Context) {
     fun decryptOriginalBytes(id: String): ByteArray? {
         val enc = File(originalsDir, "$id.enc")
         if (!enc.exists()) return null
-        return CryptoManager.decrypt(enc.readBytes())
+        return decryptBytes(enc.readBytes())
     }
 
     /**
@@ -274,9 +284,9 @@ class SecurePhotoStore(private val context: Context) {
         addDeletedUuid(meta.optString("uuid", ""))
         meta.put("deletedAt", deletedAt)
         writeMetaIn(trashMetaDir, id, meta)
-        // Both forms go: the encrypted record and any plaintext one an older install left.
-        File(metaDir, "$id.enc").delete()
-        File(metaDir, "$id.json").delete()
+        // Every form goes: the encrypted record, any plaintext one an older install left,
+        // and any half-written staging file from an interrupted save.
+        clearMetaFiles(metaDir, id)
     }
 
     /** Lists trashed photos, most-recently-deleted first. */
@@ -304,21 +314,34 @@ class SecurePhotoStore(private val context: Context) {
     fun restore(id: String) {
         move(File(trashOriginalsDir, "$id.enc"), File(originalsDir, "$id.enc"))
         move(File(trashMaskedDir, "$id.jpg"), File(maskedDir, "$id.jpg"))
-        val meta = readTrashMeta(id) ?: JSONObject()
+        // If the trash record is missing (a delete that was interrupted between moving the
+        // files and writing the record), fall back to whatever is still in the live folder
+        // rather than writing an empty object over a memo that survived.
+        val meta = readTrashMeta(id) ?: readMeta(id) ?: JSONObject()
         // The photo is back in the library, so lift its tombstone.
         removeDeletedUuid(meta.optString("uuid", ""))
         meta.remove("deletedAt")
         writeMetaIn(metaDir, id, meta)
-        File(trashMetaDir, "$id.enc").delete()
-        File(trashMetaDir, "$id.json").delete()
+        clearMetaFiles(trashMetaDir, id)
     }
 
     /** Permanently removes a single trashed photo. */
     fun purge(id: String) {
         File(trashOriginalsDir, "$id.enc").delete()
         File(trashMaskedDir, "$id.jpg").delete()
-        File(trashMetaDir, "$id.enc").delete()
-        File(trashMetaDir, "$id.json").delete()
+        clearMetaFiles(trashMetaDir, id)
+    }
+
+    /**
+     * Removes every on-disk form of one metadata record: encrypted, legacy plaintext, the
+     * quarantined copy of an unreadable record, and any staging file left by a save that was
+     * interrupted. "Deleted for good" has to mean nothing is left behind.
+     */
+    private fun clearMetaFiles(dir: File, id: String) {
+        File(dir, "$id.enc").delete()
+        File(dir, "$id.json").delete()
+        File(dir, "$id.enc.unreadable").delete()
+        dir.listFiles { f -> f.name.startsWith("$id.enc.tmp") }?.forEach { it.delete() }
     }
 
     /** Permanently removes every trashed photo. */
@@ -435,12 +458,42 @@ class SecurePhotoStore(private val context: Context) {
 
     /** User-defined categories (persisted across sessions). */
     fun loadCustomCategories(): List<String> {
-        if (!categoriesFile.exists()) return emptyList()
+        val text = when {
+            categoriesFile.exists() -> try {
+                String(decryptBytes(categoriesFile.readBytes()), Charsets.UTF_8)
+            } catch (e: Exception) {
+                return emptyList()
+            }
+            legacyCategoriesFile.exists() -> legacyCategoriesFile.readText()
+            else -> return emptyList()
+        }
         return try {
-            val arr = JSONArray(categoriesFile.readText())
+            val arr = JSONArray(text)
             (0 until arr.length()).map { arr.getString(it) }
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    /** Writes the category list encrypted, dropping any plaintext predecessor. */
+    private fun saveCustomCategories(names: List<String>) {
+        val arr = JSONArray()
+        names.forEach { arr.put(it) }
+        categoriesFile.writeBytes(encryptBytes(arr.toString().toByteArray(Charsets.UTF_8)))
+        legacyCategoriesFile.delete()
+    }
+
+    /** Moves a plaintext category list from an older install into the encrypted form. */
+    private fun migrateCategoriesToEncrypted() {
+        if (!legacyCategoriesFile.exists() || categoriesFile.exists()) {
+            // Nothing to do, or the encrypted form already won.
+            if (categoriesFile.exists()) legacyCategoriesFile.delete()
+            return
+        }
+        try {
+            saveCustomCategories(loadCustomCategories())
+        } catch (e: Exception) {
+            // Keep the plaintext and retry next launch, same as the per-photo records.
         }
     }
 
@@ -456,9 +509,7 @@ class SecurePhotoStore(private val context: Context) {
         if (trimmed.isEmpty() || PhotoCategories.isBuiltIn(trimmed)) return
         val current = loadCustomCategories().toMutableList()
         if (!current.remove(trimmed)) return
-        val arr = JSONArray()
-        current.forEach { arr.put(it) }
-        categoriesFile.writeText(arr.toString())
+        saveCustomCategories(current)
     }
 
     /** Adds a new custom category if it is non-blank and not already known. */
@@ -468,9 +519,7 @@ class SecurePhotoStore(private val context: Context) {
         val current = loadCustomCategories().toMutableList()
         if (trimmed in current) return
         current.add(trimmed)
-        val arr = JSONArray()
-        current.forEach { arr.put(it) }
-        categoriesFile.writeText(arr.toString())
+        saveCustomCategories(current)
     }
 
     /**
@@ -591,21 +640,21 @@ class SecurePhotoStore(private val context: Context) {
         }
         if (!accessLogFile.exists()) return JSONArray()
         return try {
-            JSONArray(String(CryptoManager.decrypt(accessLogFile.readBytes()), Charsets.UTF_8))
+            JSONArray(String(decryptBytes(accessLogFile.readBytes()), Charsets.UTF_8))
         } catch (e: Exception) {
             JSONArray()
         }
     }
 
     private fun writeAccessLogArray(arr: JSONArray) {
-        accessLogFile.writeBytes(CryptoManager.encrypt(arr.toString().toByteArray(Charsets.UTF_8)))
+        accessLogFile.writeBytes(encryptBytes(arr.toString().toByteArray(Charsets.UTF_8)))
     }
 
     private fun readArchiveMonth(month: String): List<AccessEntry> {
         val f = File(logArchiveDir, "$month.json.gz.enc")
         if (!f.exists()) return emptyList()
         return try {
-            val gzipped = CryptoManager.decrypt(f.readBytes())
+            val gzipped = decryptBytes(f.readBytes())
             val json = java.util.zip.GZIPInputStream(gzipped.inputStream()).use {
                 it.readBytes().toString(Charsets.UTF_8)
             }
@@ -621,7 +670,7 @@ class SecurePhotoStore(private val context: Context) {
         val plain = arr.toString().toByteArray(Charsets.UTF_8)
         val gzipOut = java.io.ByteArrayOutputStream()
         java.util.zip.GZIPOutputStream(gzipOut).use { it.write(plain) }
-        File(logArchiveDir, "$month.json.gz.enc").writeBytes(CryptoManager.encrypt(gzipOut.toByteArray()))
+        File(logArchiveDir, "$month.json.gz.enc").writeBytes(encryptBytes(gzipOut.toByteArray()))
     }
 
     /** "yyyy-MM" key (device-local calendar) for grouping entries into monthly archives. */
@@ -635,17 +684,21 @@ class SecurePhotoStore(private val context: Context) {
 
     /**
      * Reads one metadata record, preferring the encrypted form and falling back to the
-     * plaintext file left by an older install (see [migrateMetaToEncrypted]).
+     * plaintext file left by an older install (see [migratePlaintextToEncrypted]).
      */
     private fun readMetaIn(dir: File, id: String): JSONObject? {
         val enc = File(dir, "$id.enc")
         if (enc.exists()) {
-            return try {
-                JSONObject(String(CryptoManager.decrypt(enc.readBytes()), Charsets.UTF_8))
+            try {
+                return JSONObject(String(decryptBytes(enc.readBytes()), Charsets.UTF_8))
             } catch (e: Exception) {
-                // A record we cannot decrypt is not a reason to lose the photo: fall through
-                // to the legacy file if one is still there, otherwise report "no metadata".
-                readLegacyMeta(dir, id)
+                // Returning "no metadata" here would be quietly destructive: the callers all
+                // rebuild from an empty object and write it straight back, so a single
+                // unreadable record would lose the memo, the category, the mask spec and the
+                // uuid (which the tombstone and de-duplication lists are keyed on).
+                // Move the unreadable bytes aside instead, so the write that follows creates
+                // a fresh record without overwriting evidence that could still be recovered.
+                enc.renameTo(File(dir, "$id.enc.unreadable"))
             }
         }
         return readLegacyMeta(dir, id)
@@ -707,12 +760,14 @@ class SecurePhotoStore(private val context: Context) {
      */
     private fun writeMetaIn(dir: File, id: String, json: JSONObject) {
         val target = File(dir, "$id.enc")
-        val tmp = File(dir, "$id.enc.tmp")
-        tmp.writeBytes(CryptoManager.encrypt(json.toString().toByteArray(Charsets.UTF_8)))
+        // Unique per write: two IO threads (the gallery refresh and the trash refresh) can
+        // stage the same id at once, and a shared name would let them overwrite each other.
+        val tmp = File(dir, "$id.enc.tmp.${System.nanoTime()}")
+        tmp.writeBytes(encryptBytes(json.toString().toByteArray(Charsets.UTF_8)))
         if (!tmp.renameTo(target)) {
             target.writeBytes(tmp.readBytes())
-            tmp.delete()
         }
+        tmp.delete()
         File(dir, "$id.json").delete()
     }
 
@@ -727,7 +782,8 @@ class SecurePhotoStore(private val context: Context) {
      * plaintext file and is retried on the next launch, so a bad record can never cost the
      * user their metadata. (Same shape as the access-log migration above.)
      */
-    private fun migrateMetaToEncrypted() {
+    fun migratePlaintextToEncrypted() {
+        migrateCategoriesToEncrypted()
         listOf(metaDir, trashMetaDir).forEach { dir ->
             dir.listFiles { f -> f.extension == "json" }?.forEach { legacy ->
                 val id = legacy.nameWithoutExtension

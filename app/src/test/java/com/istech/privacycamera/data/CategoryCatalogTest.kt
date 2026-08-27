@@ -57,11 +57,32 @@ class CategoryCatalogTest {
     }
 
     @Test
-    fun `表示は7個までで残りは折りたたまれる`() {
+    fun `表示は8個までで残りは折りたたまれる`() {
         val all = (1..12).map { "cat$it" }
         val (visible, folded) = CategoryCatalog.split(all)
-        assertThat(visible).hasSize(CategoryCatalog.MAX_VISIBLE)
-        assertThat(folded).hasSize(12 - CategoryCatalog.MAX_VISIBLE)
+        assertThat(visible).hasSize(8)
+        assertThat(folded).hasSize(12 - 8)
+    }
+
+    @Test
+    fun `最初から入っているカテゴリだけなら折りたたみは起きない`() {
+        // A brand-new install must not show "ほかのカテゴリ" before the user has added
+        // anything: the cap exists for crowding the user caused, not for the built-ins.
+        val fresh = CategoryCatalog.build(custom = emptyList(), usedOnPhotos = emptyList())
+        val (visible, folded) = CategoryCatalog.split(fresh, selected = PhotoCategories.UNCLASSIFIED)
+        assertThat(folded).isEmpty()
+        assertThat(visible).containsExactlyElementsIn(fresh)
+    }
+
+    @Test
+    fun `折りたたんでもカテゴリは1つも失われない`() {
+        // The selected-category swap moves entries between the two lists; dropping one on the
+        // way would make it unreachable from both the chips and the "ほかのカテゴリ" sheet.
+        val all = (1..12).map { "cat$it" }
+        listOf(null, "cat1", "cat9", "cat12").forEach { selected ->
+            val (visible, folded) = CategoryCatalog.split(all, selected = selected)
+            assertThat(visible + folded).containsExactlyElementsIn(all)
+        }
     }
 
     @Test
@@ -72,6 +93,7 @@ class CategoryCatalogTest {
         assertThat(visible).contains("cat11")
         assertThat(folded).doesNotContain("cat11")
         assertThat(visible).hasSize(CategoryCatalog.MAX_VISIBLE)
+        assertThat(visible + folded).containsExactlyElementsIn(all)
     }
 
     @Test

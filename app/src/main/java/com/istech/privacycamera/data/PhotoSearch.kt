@@ -63,12 +63,8 @@ object PhotoSearch {
         query: String = "",
         category: String? = null
     ): List<PhotoItem> {
-        val q = normalize(query.trim())
         return items.filter { item ->
-            (category == null || item.category == category) &&
-                (q.isEmpty() ||
-                    normalize(item.caption).contains(q) ||
-                    normalize(item.category).contains(q))
+            (category == null || item.category == category) && matches(item, query)
         }
     }
 }
