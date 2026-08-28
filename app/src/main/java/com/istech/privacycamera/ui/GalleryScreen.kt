@@ -26,6 +26,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -54,6 +55,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
@@ -142,14 +144,9 @@ fun GalleryScreen(
         val pass = pendingPassphrase
         pendingPassphrase = null
         if (uri != null && pass != null) {
-            viewModel.exportBackup(uri, pass.toCharArray()) { ok ->
-                Toast.makeText(
-                    context,
-                    if (ok) "暗号化バックアップを書き出し、復元できることを確認しました"
-                    else "書き出しに失敗しました（このファイルは信頼できません。作り直してください）",
-                    Toast.LENGTH_LONG
-                ).show()
-            }
+            // No toast: the result panel states the outcome, the file name and the count, and
+            // waits to be acknowledged. A toast on top of it would say less and vanish sooner.
+            viewModel.exportBackup(uri, pass.toCharArray()) { }
         }
     }
     val createMigrationLauncher = rememberLauncherForActivityResult(
@@ -203,6 +200,8 @@ fun GalleryScreen(
 
     val query by viewModel.query.collectAsState()
     val exporting by viewModel.exporting.collectAsState()
+    val exportProgress by viewModel.exportProgress.collectAsState()
+    val exportResult by viewModel.exportResult.collectAsState()
 
     // The search box and the category filter narrow the same list, so picking a category and
     // then typing searches within it.
@@ -455,7 +454,9 @@ fun GalleryScreen(
     // export is the user's only route off this device, and walking away from it mid-write is
     // what produced the broken, header-only files during beta.
     if (exporting) {
-        BackupProgressOverlay()
+        BackupProgressOverlay(done = exportProgress.first, total = exportProgress.second)
+    } else exportResult?.let { result ->
+        BackupResultOverlay(result = result, onAcknowledge = { viewModel.acknowledgeExport() })
     }
 
     if (showCategoryCleanup) {
@@ -842,7 +843,100 @@ private fun CategoryCleanupDialog(
  * finish rather than discovering later that it did not.
  */
 @Composable
-private fun BackupProgressOverlay() {
+internal fun BackupProgressOverlay(done: Int, total: Int) {
+    BlockingOverlay {
+        // A real fraction, not a spinner: on a large library the spinner gives no way to tell
+        // "working" from "stuck", which is exactly when people walk away from it.
+        if (total > 0) {
+            LinearProgressIndicator(
+                progress = { done.toFloat() / total.toFloat() },
+                color = androidx.compose.ui.graphics.Color.White,
+                modifier = Modifier.fillMaxWidth()
+            )
+        } else {
+            LinearProgressIndicator(
+                color = androidx.compose.ui.graphics.Color.White,
+                modifier = Modifier.fillMaxWidth()
+            )
+        }
+        Text(
+            "バックアップを書き出しています",
+            color = androidx.compose.ui.graphics.Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 24.dp)
+        )
+        Text(
+            if (total > 0) "$done / $total 枚" else "準備しています…",
+            color = androidx.compose.ui.graphics.Color.White,
+            style = MaterialTheme.typography.headlineSmall,
+            modifier = Modifier.padding(top = 8.dp)
+        )
+        Text(
+            "終わるまでこの画面のままお待ちください。",
+            color = androidx.compose.ui.graphics.Color(0xFFCCCCCC),
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 12.dp)
+        )
+    }
+}
+
+/**
+ * Held on screen after the export finishes, until the user presses OK.
+ *
+ * The point is that the user leaves knowing *what was produced* — the file name and how many
+ * photos are in it. Vanishing the moment writing stopped told them only that something had
+ * happened. Interaction stays blocked until this is acknowledged, so the lock screen cannot
+ * slide in over the very confirmation they were asked to read.
+ */
+@Composable
+internal fun BackupResultOverlay(
+    result: PhotoViewModel.ExportResult,
+    onAcknowledge: () -> Unit
+) {
+    BlockingOverlay {
+        Text(
+            if (result.success) "バックアップを書き出しました" else "書き出しに失敗しました",
+            color = androidx.compose.ui.graphics.Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            textAlign = TextAlign.Center
+        )
+        if (result.success) {
+            Text(
+                "${result.count} 枚",
+                color = androidx.compose.ui.graphics.Color.White,
+                style = MaterialTheme.typography.headlineSmall,
+                modifier = Modifier.padding(top = 8.dp)
+            )
+        }
+        if (result.fileName.isNotBlank()) {
+            Text(
+                result.fileName,
+                color = androidx.compose.ui.graphics.Color.White,
+                style = MaterialTheme.typography.bodyMedium,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.padding(top = 12.dp)
+            )
+        }
+        Text(
+            result.detail,
+            color = androidx.compose.ui.graphics.Color(0xFFCCCCCC),
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(top = 12.dp)
+        )
+        TextButton(
+            onClick = onAcknowledge,
+            modifier = Modifier.padding(top = 20.dp)
+        ) {
+            Text("OK", color = androidx.compose.ui.graphics.Color.White)
+        }
+    }
+}
+
+/** Dimmed full-screen panel that keeps the screen awake and consumes every gesture. */
+@Composable
+private fun BlockingOverlay(content: @Composable ColumnScope.() -> Unit) {
     val view = LocalView.current
     DisposableEffect(Unit) {
         view.keepScreenOn = true
@@ -852,28 +946,13 @@ private fun BackupProgressOverlay() {
         modifier = Modifier
             .fillMaxSize()
             .background(androidx.compose.ui.graphics.Color(0xF2000000))
-            // Consume every gesture: nothing underneath is reachable until this clears.
             .pointerInput(Unit) { awaitPointerEventScope { while (true) { awaitPointerEvent() } } },
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            modifier = Modifier.padding(32.dp)
-        ) {
-            CircularProgressIndicator(color = androidx.compose.ui.graphics.Color.White)
-            Text(
-                "バックアップを書き出しています",
-                color = androidx.compose.ui.graphics.Color.White,
-                style = MaterialTheme.typography.titleMedium,
-                modifier = Modifier.padding(top = 24.dp)
-            )
-            Text(
-                "終わるまでこの画面のままお待ちください。\n途中で閉じると、復元できないファイルができてしまいます。",
-                color = androidx.compose.ui.graphics.Color(0xFFCCCCCC),
-                style = MaterialTheme.typography.bodyMedium,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(top = 12.dp)
-            )
-        }
+            modifier = Modifier.padding(32.dp),
+            content = content
+        )
     }
 }

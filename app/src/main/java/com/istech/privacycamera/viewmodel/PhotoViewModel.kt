@@ -19,6 +19,7 @@ import android.app.Application
 import android.graphics.Bitmap
 import android.net.Uri
 import android.provider.DocumentsContract
+import android.provider.OpenableColumns
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.istech.privacycamera.PrivacyCameraApplication
@@ -61,6 +62,34 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     /** True while a backup is being written; the UI blocks interaction until it clears. */
     private val _exporting = MutableStateFlow(false)
     val exporting: StateFlow<Boolean> = _exporting.asStateFlow()
+
+    /** Photos written so far / total, for the progress bar. */
+    private val _exportProgress = MutableStateFlow(0 to 0)
+    val exportProgress: StateFlow<Pair<Int, Int>> = _exportProgress.asStateFlow()
+
+    /**
+     * The finished export, held until the user acknowledges it.
+     *
+     * The overlay used to vanish the instant writing stopped, which gave no chance to see
+     * what had actually been produced. Keeping the result on screen — with the file name and
+     * the count — means the user leaves knowing a backup exists and what is in it.
+     */
+    private val _exportResult = MutableStateFlow<ExportResult?>(null)
+    val exportResult: StateFlow<ExportResult?> = _exportResult.asStateFlow()
+
+    /** Outcome of a finished export, shown until dismissed. */
+    data class ExportResult(
+        val success: Boolean,
+        val fileName: String,
+        val count: Int,
+        val detail: String
+    )
+
+    /** Dismisses the finished-export panel and lifts the interaction block. */
+    fun acknowledgeExport() {
+        _exportResult.value = null
+        BackupGate.isRunning = false
+    }
 
     /** The free-text search box; blank means "not searching". */
     private val _query = MutableStateFlow("")
@@ -341,15 +370,18 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         // a half-written backup. NonCancellable additionally guarantees the logging and the
         // cleanup below happen even if the scope itself is being torn down — losing the log is
         // how the beta failures became untraceable.
+        _exportProgress.value = 0 to items.size
         application.backgroundScope.launch {
-            val ok = withContext(NonCancellable) {
+            val (ok, count) = withContext(NonCancellable) {
                 val resolver = getApplication<Application>().contentResolver
                 var written = -1
                 var verified = -1
                 var failure: String? = null
                 try {
                     resolver.openOutputStream(uri)?.use { out ->
-                        written = BackupManager.export(out, items, store, passphrase)
+                        written = BackupManager.export(out, items, store, passphrase) { done, total ->
+                            _exportProgress.value = done to total
+                        }
                     } ?: run { failure = "書き出し先を開けませんでした" }
                     // Read the file straight back and confirm it decrypts, so a truncated or
                     // corrupt write is caught NOW rather than when the backup is finally
@@ -384,12 +416,33 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                         "暗号化バックアップ $written 枚を書き出し・復元検証OK"
                     )
                 }
-                success
+                success to written.coerceAtLeast(0)
             }
-            BackupGate.isRunning = false
             _exporting.value = false
-            onResult(ok)
+            _exportResult.value = ExportResult(
+                success = ok,
+                fileName = displayNameOf(uri),
+                count = count,
+                detail = if (ok) "この端末の外に持ち出せる唯一の控えです。"
+                else "壊れたファイルは残していません。もう一度お試しください。"
+            )
+            // BackupGate stays set until the user acknowledges: the lock must not slide in
+            // over the result they are being asked to read.
+            // Back to Main before calling out: this scope is Dispatchers.IO, and callers
+            // touch UI (a Toast from an IO thread crashes with "Can't toast on a thread that
+            // has not called Looper.prepare()").
+            withContext(Dispatchers.Main) { onResult(ok) }
         }
+    }
+
+    /** The file name the user picked, for the confirmation panel. */
+    private fun displayNameOf(uri: Uri): String = try {
+        getApplication<Application>().contentResolver
+            .query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)
+            ?.use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            ?: uri.lastPathSegment.orEmpty()
+    } catch (e: Exception) {
+        uri.lastPathSegment.orEmpty()
     }
 
     /** Removes a failed export so a broken file is never mistaken for a usable backup. */

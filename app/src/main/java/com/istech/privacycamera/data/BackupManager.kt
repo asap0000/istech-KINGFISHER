@@ -92,9 +92,12 @@ object BackupManager {
         out: OutputStream,
         items: List<PhotoItem>,
         store: SecurePhotoStore,
-        passphrase: CharArray
+        passphrase: CharArray,
+        /** Called as each photo lands, so the caller can show real progress rather than a spinner. */
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
     ): Int {
         val exportable = items.filter { store.hasOriginal(it.id) }
+        onProgress(0, exportable.size)
 
         val salt = ByteArray(BackupCrypto.SALT_SIZE).also { SecureRandom().nextBytes(it) }
         val key = BackupCrypto.deriveKey(passphrase, salt)
@@ -114,6 +117,7 @@ object BackupManager {
             val manifest = buildManifest(exportable).toString().toByteArray(Charsets.UTF_8)
             dos.writeInt(manifest.size)
             dos.write(manifest)
+            var done = 0
             for (item in exportable) {
                 // An original we cannot read must not be written as an empty entry: the
                 // export would report success while quietly producing a backup that restores
@@ -122,6 +126,8 @@ object BackupManager {
                     ?: throw IllegalStateException("原本を読み出せませんでした（${item.id}）")
                 dos.writeInt(bytes.size)
                 dos.write(bytes)
+                done++
+                onProgress(done, exportable.size)
             }
         }
         return exportable.size
