@@ -240,6 +240,16 @@ object BackupManager {
 
         /** Wrong passphrase or a corrupt/tampered file (decryption produced garbage). */
         object WrongPassphraseOrCorrupt : RestoreOutcome()
+
+        /**
+         * The container header is intact but carries no encrypted payload at all.
+         *
+         * Distinguished from [WrongPassphraseOrCorrupt] because the advice is different and
+         * the wrong advice costs real effort: a beta user hit exactly this and retyped the
+         * passphrase two or three times, since the app told them it might be wrong. Nothing
+         * they typed could ever have worked — there was nothing to decrypt.
+         */
+        object EmptyBackup : RestoreOutcome()
     }
 
     private const val MAX_MANIFEST_BYTES = 64 * 1024 * 1024
@@ -279,8 +289,13 @@ object BackupManager {
         // A successful doFinal both decrypts and authenticates, so it doubles as the
         // passphrase/integrity gate. The file format is unchanged, so existing backups
         // written by [export] restore correctly.
+        val payload = input.readBytes()
+        // An export that died after writing the header leaves exactly this: a valid-looking
+        // 32-byte file with nothing after it. Saying "wrong passphrase" here sends the user
+        // to retype something that cannot help.
+        if (payload.isEmpty()) return RestoreOutcome.EmptyBackup
         val plain = try {
-            cipher.doFinal(input.readBytes())
+            cipher.doFinal(payload)
         } catch (e: Exception) {
             return RestoreOutcome.WrongPassphraseOrCorrupt
         }

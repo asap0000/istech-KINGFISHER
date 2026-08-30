@@ -112,6 +112,26 @@ class BackupExportFailureTest {
             emptySet()
         )
 
+        // Not "wrong passphrase": there is nothing to decrypt, and telling the user to retype
+        // sends them after a fix that cannot exist (a beta user tried two or three times).
+        assertThat(outcome).isInstanceOf(BackupManager.RestoreOutcome.EmptyBackup::class.java)
+    }
+
+    @Test
+    fun `中身のあるファイルでパスフレーズが違えばそう言う`() {
+        // The other side of the split: a real backup with the wrong key must still say so.
+        val store = newStore()
+        addPhoto(store, "photo1")
+        val out = ByteArrayOutputStream()
+        BackupManager.export(out, store.list(), store, "correct-pass".toCharArray())
+
+        val outcome = BackupManager.importEncrypted(
+            out.toByteArray().inputStream(),
+            store,
+            "wrong-pass".toCharArray(),
+            emptySet()
+        )
+
         assertThat(outcome).isInstanceOf(BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt::class.java)
     }
 }

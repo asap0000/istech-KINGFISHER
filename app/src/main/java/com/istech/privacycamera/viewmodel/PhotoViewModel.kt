@@ -481,6 +481,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                         "復元 ${o.imported} 枚 / スキップ ${o.skipped} 枚"
                     BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt -> "失敗（パスフレーズ違い/破損）"
                     BackupManager.RestoreOutcome.NotABackup -> "失敗（バックアップ形式でない）"
+                    BackupManager.RestoreOutcome.EmptyBackup -> "失敗（中身が空＝書き出しが途中で終わったファイル）"
                 }
                 store.logAccess("", AccessActions.BACKUP_RESTORE, detail)
                 o

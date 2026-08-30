@@ -18,6 +18,7 @@ package com.istech.privacycamera.ui
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -581,6 +582,9 @@ private fun restoreResultMessage(outcome: BackupManager.RestoreOutcome): String 
         "復元できませんでした。パスフレーズが違うか、ファイルが壊れています。"
     BackupManager.RestoreOutcome.NotABackup ->
         "このファイルは暗号化バックアップではありません。"
+    BackupManager.RestoreOutcome.EmptyBackup ->
+        "このファイルには中身がありません（書き出しが途中で終わったようです）。" +
+            "パスフレーズの問題ではないので、もう一度書き出してください。"
 }
 
 /**
@@ -937,6 +941,10 @@ internal fun BackupResultOverlay(
 /** Dimmed full-screen panel that keeps the screen awake and consumes every gesture. */
 @Composable
 private fun BlockingOverlay(content: @Composable ColumnScope.() -> Unit) {
+    // The touch shield alone was not enough: the hardware back button went straight past it,
+    // so the screen could still be navigated away from mid-write — the exact thing this panel
+    // exists to prevent. Swallow back for as long as the panel is up.
+    BackHandler(enabled = true) { /* deliberately inert */ }
     val view = LocalView.current
     DisposableEffect(Unit) {
         view.keepScreenOn = true

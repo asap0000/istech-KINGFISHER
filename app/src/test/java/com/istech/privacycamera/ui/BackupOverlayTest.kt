@@ -15,8 +15,10 @@
  */
 package com.istech.privacycamera.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.activity.ComponentActivity
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import com.istech.privacycamera.viewmodel.PhotoViewModel
@@ -33,7 +35,7 @@ import org.robolectric.RobolectricTestRunner
 class BackupOverlayTest {
 
     @get:Rule
-    val compose = createComposeRule()
+    val compose = createAndroidComposeRule<ComponentActivity>()
 
     @Test
     fun `進捗は何枚中何枚かを示す`() {
@@ -74,6 +76,23 @@ class BackupOverlayTest {
 
         compose.onNodeWithText("OK").performClick()
         assert(acknowledged) { "OK を押しても解除が呼ばれていない" }
+    }
+
+    @Test
+    fun `書き出し中は戻るボタンで抜けられない`() {
+        // The touch shield alone let the hardware back button through, so the screen could be
+        // navigated away from mid-write — reported from the beta device.
+        var backReachedTheApp = false
+        compose.setContent {
+            BackHandler(enabled = true) { backReachedTheApp = true }
+            BackupProgressOverlay(done = 3, total = 13)
+        }
+
+        compose.runOnUiThread {
+            compose.activity.onBackPressedDispatcher.onBackPressed()
+        }
+
+        assert(!backReachedTheApp) { "戻るボタンがオーバーレイを素通りしている" }
     }
 
     @Test
