@@ -86,6 +86,8 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -555,6 +557,7 @@ private fun RestorePassphraseDialog(
                     label = { Text("パスフレーズ") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(top = 16.dp)
@@ -648,6 +651,7 @@ private fun ExportPassphraseDialog(
                     label = { Text("パスフレーズ（$MIN_PASSPHRASE_LENGTH 文字以上）") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     isError = pass.isNotEmpty() && tooShort,
                     modifier = Modifier
                         .fillMaxWidth()
@@ -659,6 +663,7 @@ private fun ExportPassphraseDialog(
                     label = { Text("パスフレーズ（確認）") },
                     singleLine = true,
                     visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
                     isError = mismatch,
                     modifier = Modifier
                         .fillMaxWidth()

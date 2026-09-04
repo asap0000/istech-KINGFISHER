@@ -15,6 +15,8 @@
  */
 package com.istech.privacycamera.crypto
 
+import java.nio.CharBuffer
+import java.text.Normalizer
 import javax.crypto.Cipher
 import javax.crypto.SecretKey
 import javax.crypto.SecretKeyFactory
@@ -44,6 +46,24 @@ object BackupCrypto {
     private const val PBKDF2_ITERATIONS = 120_000
     private const val KEY_BITS = 256
     private const val TRANSFORMATION = "AES/GCM/NoPadding"
+
+    /**
+     * [passphrase] with full-width characters folded to their half-width forms (NFKC).
+     *
+     * A Japanese IME hands a password field "１２３４５６" when the user typed 123456, and the field
+     * is masked, so nothing on screen says which width was stored. A backup written with the
+     * full-width form then rejects every half-width attempt as "wrong passphrase" — the file is
+     * intact and the passphrase is remembered correctly, only the width differs. Measured on a
+     * beta device (2026-09-04): one backup file decrypted with U+FF11.. and failed with '1'..,
+     * which is how a user ends up retyping a passphrase that was never wrong.
+     *
+     * [export][com.istech.privacycamera.data.BackupManager.export] derives its key from this
+     * form so a new backup never depends on the width, and
+     * [importEncrypted][com.istech.privacycamera.data.BackupManager.importEncrypted] tries the
+     * raw input first — which is what opens backups written before this existed — and then this.
+     */
+    fun normalizeWidth(passphrase: CharArray): CharArray =
+        Normalizer.normalize(CharBuffer.wrap(passphrase), Normalizer.Form.NFKC).toCharArray()
 
     /** Derives a 256-bit AES key from [passphrase] and [salt] using PBKDF2-HMAC-SHA256. */
     fun deriveKey(passphrase: CharArray, salt: ByteArray): SecretKey {

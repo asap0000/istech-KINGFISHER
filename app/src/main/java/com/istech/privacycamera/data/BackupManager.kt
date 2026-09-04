@@ -100,7 +100,9 @@ object BackupManager {
         onProgress(0, exportable.size)
 
         val salt = ByteArray(BackupCrypto.SALT_SIZE).also { SecureRandom().nextBytes(it) }
-        val key = BackupCrypto.deriveKey(passphrase, salt)
+        // Width-normalized so a backup never depends on whether the IME produced "123456" or
+        // "１２３４５６" — the field is masked, so the user cannot see which one they got.
+        val key = BackupCrypto.deriveKey(BackupCrypto.normalizeWidth(passphrase), salt)
         val cipher = BackupCrypto.newEncryptCipher(key, salt)
 
         // Plaintext header: format magic + KDF salt + GCM iv.
@@ -252,6 +254,40 @@ object BackupManager {
         object EmptyBackup : RestoreOutcome()
     }
 
+    /**
+     * Decrypts [payload], trying [passphrase] as typed and then width-normalized (NFKC).
+     *
+     * Two attempts rather than one because the two forms are not interchangeable in the key
+     * derivation, and which one a backup was written with depends on the IME that was active
+     * at the time — something the masked field never showed the user. The raw form comes
+     * first so backups written before [BackupCrypto.normalizeWidth] existed still open with
+     * the exact characters they were written with; the normalized form then opens a
+     * half-width attempt against a file whose passphrase reached the field full-width.
+     *
+     * A wrong passphrase simply fails both. Each attempt is a full PBKDF2 derivation, so the
+     * cost of the second one is paid only when the first fails.
+     */
+    private fun decrypt(
+        payload: ByteArray,
+        passphrase: CharArray,
+        salt: ByteArray,
+        iv: ByteArray
+    ): ByteArray? {
+        val normalized = BackupCrypto.normalizeWidth(passphrase)
+        val candidates =
+            if (normalized.contentEquals(passphrase)) listOf(passphrase)
+            else listOf(passphrase, normalized)
+        for (candidate in candidates) {
+            try {
+                val key = BackupCrypto.deriveKey(candidate, salt)
+                return BackupCrypto.newDecryptCipher(key, salt, iv).doFinal(payload)
+            } catch (e: Exception) {
+                // Wrong key for this candidate (or a corrupt file) — fall through to the next.
+            }
+        }
+        return null
+    }
+
     private const val MAX_MANIFEST_BYTES = 64 * 1024 * 1024
     private const val MAX_BLOB_BYTES = 256 * 1024 * 1024
 
@@ -260,6 +296,9 @@ object BackupManager {
      * [passphrase]. Photos whose uuid is already present ([existingUuids], which should
      * include trashed photos so a restore doesn't resurrect something the user deleted) are
      * skipped; the rest are re-encrypted into the local store with their metadata.
+     *
+     * [passphrase] is tried as typed and then width-normalized, so a backup whose passphrase
+     * reached the field full-width still opens from a half-width attempt (see [decrypt]).
      *
      * The caller owns wiping [passphrase] afterwards.
      */
@@ -277,9 +316,6 @@ object BackupManager {
         val salt = header.copyOfRange(BackupCrypto.MAGIC.size, BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE)
         val iv = header.copyOfRange(BackupCrypto.MAGIC.size + BackupCrypto.SALT_SIZE, header.size)
 
-        val key = BackupCrypto.deriveKey(passphrase, salt)
-        val cipher = BackupCrypto.newDecryptCipher(key, salt, iv)
-
         // Decrypt the whole payload in ONE doFinal instead of streaming through a
         // CipherInputStream. AES-GCM is an AEAD cipher: the authentication tag covers the
         // entire ciphertext and can only be verified once all of it has been processed, and
@@ -287,18 +323,15 @@ object BackupManager {
         // fail or silently corrupt on larger files — which is exactly the reported symptom:
         // small backups restored, an 18-photo backup failed as "wrong passphrase/corrupt").
         // A successful doFinal both decrypts and authenticates, so it doubles as the
-        // passphrase/integrity gate. The file format is unchanged, so existing backups
-        // written by [export] restore correctly.
+        // passphrase/integrity gate (see [decrypt], which owns that call). The file format is
+        // unchanged, so existing backups written by [export] restore correctly.
         val payload = input.readBytes()
         // An export that died after writing the header leaves exactly this: a valid-looking
         // 32-byte file with nothing after it. Saying "wrong passphrase" here sends the user
         // to retype something that cannot help.
         if (payload.isEmpty()) return RestoreOutcome.EmptyBackup
-        val plain = try {
-            cipher.doFinal(payload)
-        } catch (e: Exception) {
-            return RestoreOutcome.WrongPassphraseOrCorrupt
-        }
+        val plain = decrypt(payload, passphrase, salt, iv)
+            ?: return RestoreOutcome.WrongPassphraseOrCorrupt
 
         var imported = 0
         var skipped = 0

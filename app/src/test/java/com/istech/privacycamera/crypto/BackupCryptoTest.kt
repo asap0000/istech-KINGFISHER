@@ -31,6 +31,25 @@ class BackupCryptoTest {
     private val payload = "秘密の写真データ".repeat(50).toByteArray(Charsets.UTF_8)
 
     @Test
+    fun `normalizeWidthは全角を半角にし半角は変えない`() {
+        // 日本語IMEがパスワード欄に入れる全角数字(U+FF11〜)を、打ったつもりの半角へ。
+        assertThat(BackupCrypto.normalizeWidth("１２３４５６".toCharArray()))
+            .isEqualTo("123456".toCharArray())
+        assertThat(BackupCrypto.normalizeWidth("123456".toCharArray()))
+            .isEqualTo("123456".toCharArray())
+        assertThat(BackupCrypto.normalizeWidth("ａｂｃ".toCharArray()))
+            .isEqualTo("abc".toCharArray())
+    }
+
+    @Test
+    fun `幅が違うと鍵も違う`() {
+        // 両方試す実装が必要な理由そのもの。鍵導出は幅を同一視しない。
+        val full = BackupCrypto.deriveKey("１２３４５６".toCharArray(), salt)
+        val half = BackupCrypto.deriveKey("123456".toCharArray(), salt)
+        assertThat(full.encoded).isNotEqualTo(half.encoded)
+    }
+
+    @Test
     fun deriveKey_isDeterministic_and256Bits() {
         val a = BackupCrypto.deriveKey(passphrase.copyOf(), salt)
         val b = BackupCrypto.deriveKey(passphrase.copyOf(), salt)
