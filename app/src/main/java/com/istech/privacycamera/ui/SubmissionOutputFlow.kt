@@ -122,6 +122,7 @@ fun SubmissionOutputFlow(
     var consentChecked by remember { mutableStateOf(false) }
     var working by remember { mutableStateOf(false) }
     var resultMessage by remember { mutableStateOf<String?>(null) }
+    var showNoAuthConfirm by remember { mutableStateOf(false) }
 
     val orig = original
     if (orig == null) {
@@ -165,6 +166,33 @@ fun SubmissionOutputFlow(
         return WatermarkRenderer.apply(masked, destination.trim(), dateText)
     }
 
+    fun runPrint() {
+        working = true
+        scope.launch {
+            val detail = "提出先: ${destination.trim()} / " +
+                if (wholeDisclosure) "全面開示" else "範囲 ${regions.size} 箇所"
+            // Log BEFORE printing (P5): an output that isn't logged must not happen.
+            val logged = viewModel.logOutputPrintBeforeJob(photoId, detail)
+            if (!logged) {
+                working = false
+                resultMessage = "記録に失敗したため中止しました。もう一度お試しください。"
+                return@launch
+            }
+            val submissionBitmap =
+                withContext(Dispatchers.Default) { buildSubmissionBitmap() }
+            val outcome = SubmissionPrinter.print(context, submissionBitmap, "提出用複製")
+            viewModel.logOutputResult(photoId, outcome.name)
+            working = false
+            resultMessage = when (outcome) {
+                PrintOutcome.COMPLETED -> "印刷が完了しました。"
+                PrintOutcome.CANCELED -> "印刷はキャンセルされました。"
+                PrintOutcome.FAILED -> "印刷に失敗しました。"
+                PrintOutcome.TIMEOUT -> "印刷の完了を確認できませんでした（印刷サービス側をご確認ください）。"
+                PrintOutcome.UNAVAILABLE -> "この端末では印刷を利用できません。"
+            }
+        }
+    }
+
     fun startPrint() {
         val act = activity
         if (act == null) {
@@ -173,36 +201,30 @@ fun SubmissionOutputFlow(
         }
         BiometricGate.authenticate(act) { result ->
             when (result) {
-                is BiometricGate.Result.Success, is BiometricGate.Result.NotConfigured -> {
-                    working = true
-                    scope.launch {
-                        val detail = "提出先: ${destination.trim()} / " +
-                            if (wholeDisclosure) "全面開示" else "範囲 ${regions.size} 箇所"
-                        // Log BEFORE printing (P5): an output that isn't logged must not happen.
-                        val logged = viewModel.logOutputPrintBeforeJob(photoId, detail)
-                        if (!logged) {
-                            working = false
-                            resultMessage = "記録に失敗したため中止しました。もう一度お試しください。"
-                            return@launch
-                        }
-                        val submissionBitmap =
-                            withContext(Dispatchers.Default) { buildSubmissionBitmap() }
-                        val outcome = SubmissionPrinter.print(context, submissionBitmap, "提出用複製")
-                        viewModel.logOutputResult(photoId, outcome.name)
-                        working = false
-                        resultMessage = when (outcome) {
-                            PrintOutcome.COMPLETED -> "印刷が完了しました。"
-                            PrintOutcome.CANCELED -> "印刷はキャンセルされました。"
-                            PrintOutcome.FAILED -> "印刷に失敗しました。"
-                            PrintOutcome.TIMEOUT -> "印刷の完了を確認できませんでした（印刷サービス側をご確認ください）。"
-                            PrintOutcome.UNAVAILABLE -> "この端末では印刷を利用できません。"
-                        }
-                    }
-                }
+                is BiometricGate.Result.Success -> runPrint()
                 is BiometricGate.Result.Failed ->
                     Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
+                // Sending an original out of the app used to pass unverified in silence.
+                is BiometricGate.Result.NotConfigured -> showNoAuthConfirm = true
             }
         }
+    }
+
+    if (showNoAuthConfirm) {
+        NoAuthConfirmDialog(
+            actionLabel = "提出用に印刷",
+            onProceed = {
+                showNoAuthConfirm = false
+                runPrint()
+            },
+            onDismiss = { showNoAuthConfirm = false },
+            onOpenSettings = {
+                showNoAuthConfirm = false
+                if (!openSecuritySettings(context)) {
+                    Toast.makeText(context, "設定画面を開けませんでした", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 
     when (step) {

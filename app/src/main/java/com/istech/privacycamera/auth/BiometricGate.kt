@@ -44,10 +44,31 @@ object BiometricGate {
         private set
 
     sealed interface Result {
-        data object Success : Result
+        /** Authenticated. [method] says what the user actually presented. */
+        data class Success(val method: AuthMethod) : Result
         data object Failed : Result
         /** No biometric AND no device lock is configured — nothing to verify against. */
         data object NotConfigured : Result
+    }
+
+    /**
+     * What the user presented to get in — recorded in the access log so a reader can tell
+     * a reveal that passed a fingerprint from one that passed nothing at all.
+     *
+     * Before this existed the log said only "正規表示（復号）", which reads the same either
+     * way; on a device with no screen lock every entry was of the second kind.
+     */
+    enum class AuthMethod {
+        BIOMETRIC, DEVICE_CREDENTIAL, UNKNOWN, NONE;
+
+        /** Japanese label for the access log. */
+        val label: String
+            get() = when (this) {
+                BIOMETRIC -> "生体認証"
+                DEVICE_CREDENTIAL -> "端末の暗証番号"
+                UNKNOWN -> "本人認証"
+                NONE -> "認証なし"
+            }
     }
 
     /** Whether the device can authenticate via biometric or device credential. */
@@ -71,7 +92,16 @@ object BiometricGate {
             object : BiometricPrompt.AuthenticationCallback() {
                 override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
                     isPrompting = false
-                    onResult(Result.Success)
+                    // Below API 30 the type comes back UNKNOWN; the log then says only that
+                    // authentication happened, which is still the distinction that matters.
+                    val method = when (result.authenticationType) {
+                        BiometricPrompt.AUTHENTICATION_RESULT_TYPE_BIOMETRIC ->
+                            AuthMethod.BIOMETRIC
+                        BiometricPrompt.AUTHENTICATION_RESULT_TYPE_DEVICE_CREDENTIAL ->
+                            AuthMethod.DEVICE_CREDENTIAL
+                        else -> AuthMethod.UNKNOWN
+                    }
+                    onResult(Result.Success(method))
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {

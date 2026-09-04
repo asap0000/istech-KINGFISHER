@@ -89,6 +89,7 @@ fun ViewerScreen(
 
     // The original is masked until the user passes device authentication.
     var revealed by remember { mutableStateOf(false) }
+    var showNoAuthConfirm by remember { mutableStateOf(false) }
     var showMemo by remember { mutableStateOf(false) }
 
     // Derive from the live list so caption/category edits reflect immediately.
@@ -134,22 +135,41 @@ fun ViewerScreen(
             when (result) {
                 is BiometricGate.Result.Success -> {
                     revealed = true
-                    viewModel.logAccess(photoId, AccessActions.REVEAL, cap)
+                    viewModel.logAccess(photoId, AccessActions.REVEAL, cap, result.method.label)
                 }
                 is BiometricGate.Result.Failed ->
                     Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
                 is BiometricGate.Result.NotConfigured -> {
-                    // No biometric and no screen lock configured: nothing to verify against.
-                    Toast.makeText(
-                        context,
-                        "端末にロックが未設定のため認証なしで表示します。設定 > セキュリティ で画面ロックの設定を推奨します。",
-                        Toast.LENGTH_LONG
-                    ).show()
-                    revealed = true
-                    viewModel.logAccess(photoId, AccessActions.REVEAL, cap)
+                    // Nothing to verify against. This used to reveal behind a Toast that is
+                    // gone in seconds; now the user is asked, and offered the way out.
+                    showNoAuthConfirm = true
                 }
             }
         }
+    }
+
+    if (showNoAuthConfirm) {
+        NoAuthConfirmDialog(
+            actionLabel = "正規表示",
+            onProceed = {
+                showNoAuthConfirm = false
+                revealed = true
+                // Recorded as "認証なし" so the log distinguishes this from a real reveal.
+                viewModel.logAccess(
+                    photoId,
+                    AccessActions.REVEAL,
+                    item?.caption.orEmpty(),
+                    BiometricGate.AuthMethod.NONE.label
+                )
+            },
+            onDismiss = { showNoAuthConfirm = false },
+            onOpenSettings = {
+                showNoAuthConfirm = false
+                if (!openSecuritySettings(context)) {
+                    Toast.makeText(context, "設定画面を開けませんでした", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 
     Scaffold(

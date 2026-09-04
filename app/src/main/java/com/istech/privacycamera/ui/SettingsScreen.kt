@@ -35,7 +35,9 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -58,6 +60,7 @@ fun SettingsScreen(
     val context = LocalContext.current
     val activity = remember(context) { context.findFragmentActivity() }
     val printEnabled by viewModel.printEnabled.collectAsState()
+    var showNoAuthConfirm by remember { mutableStateOf(false) }
 
     fun requestEnable() {
         val act = activity
@@ -67,12 +70,30 @@ fun SettingsScreen(
         }
         BiometricGate.authenticate(act) { result ->
             when (result) {
-                is BiometricGate.Result.Success, is BiometricGate.Result.NotConfigured ->
-                    viewModel.setPrintEnabled(true)
+                is BiometricGate.Result.Success -> viewModel.setPrintEnabled(true)
                 is BiometricGate.Result.Failed ->
                     Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
+                // Turning on the path that puts originals on paper: ask before proceeding.
+                is BiometricGate.Result.NotConfigured -> showNoAuthConfirm = true
             }
         }
+    }
+
+    if (showNoAuthConfirm) {
+        NoAuthConfirmDialog(
+            actionLabel = "提出用出力を有効にする",
+            onProceed = {
+                showNoAuthConfirm = false
+                viewModel.setPrintEnabled(true)
+            },
+            onDismiss = { showNoAuthConfirm = false },
+            onOpenSettings = {
+                showNoAuthConfirm = false
+                if (!openSecuritySettings(context)) {
+                    Toast.makeText(context, "設定画面を開けませんでした", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 
     Scaffold(

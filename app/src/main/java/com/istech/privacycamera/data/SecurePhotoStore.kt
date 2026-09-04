@@ -528,7 +528,7 @@ class SecurePhotoStore(
      * event (file-level import/export, setting change, log management) uses an empty
      * [photoId].
      */
-    fun logAccess(photoId: String, action: String, caption: String) {
+    fun logAccess(photoId: String, action: String, caption: String, auth: String = "") {
         val arr = readAccessLogArray()
         arr.put(
             JSONObject()
@@ -536,6 +536,8 @@ class SecurePhotoStore(
                 .put("a", action)
                 .put("id", photoId)
                 .put("c", caption)
+                // Absent on entries written before this field existed; read back as "".
+                .put("auth", auth)
         )
         writeAccessLogArray(arr)
     }
@@ -623,7 +625,8 @@ class SecurePhotoStore(
                 timestamp = o.optLong("t"),
                 action = o.optString("a"),
                 photoId = o.optString("id"),
-                caption = o.optString("c")
+                caption = o.optString("c"),
+                auth = o.optString("auth")
             )
         }
 

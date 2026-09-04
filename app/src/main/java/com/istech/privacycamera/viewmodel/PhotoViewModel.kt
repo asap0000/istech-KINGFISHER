@@ -562,9 +562,9 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     private val _archivedMonths = MutableStateFlow<List<ArchivedMonth>>(emptyList())
     val archivedMonths: StateFlow<List<ArchivedMonth>> = _archivedMonths.asStateFlow()
 
-    fun logAccess(photoId: String, action: String, caption: String) {
+    fun logAccess(photoId: String, action: String, caption: String, auth: String = "") {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.logAccess(photoId, action, caption) }
+            withContext(Dispatchers.IO) { store.logAccess(photoId, action, caption, auth) }
         }
     }
 

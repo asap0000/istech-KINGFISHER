@@ -54,6 +54,23 @@ class LockScreenScreenshotTest {
     }
 
     @Test
+    fun `認証手段が無い端末ではそう言って設定への道を出す`() {
+        // この画面は以前、何も言わずに解錐していた。状態は端末の設定が続く限り続くので、
+        // 消える Toast ではなくここに常設するのが正しい形。
+        compose.setContent {
+            PrivacyCameraTheme {
+                LockScreen(
+                    authenticating = false,
+                    onUnlock = {},
+                    noAuthAvailable = true,
+                    onOpenSettings = {}
+                )
+            }
+        }
+        compose.onRoot().captureRoboImage("${Screenshots.DIR}/lock_screen_no_auth.png")
+    }
+
+    @Test
     fun authenticatingState_showsProgress() {
         compose.setContent {
             PrivacyCameraTheme {

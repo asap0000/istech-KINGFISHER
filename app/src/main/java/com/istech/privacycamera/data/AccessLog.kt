@@ -20,7 +20,16 @@ data class AccessEntry(
     val timestamp: Long,
     val action: String,
     val photoId: String,
-    val caption: String
+    val caption: String,
+    /**
+     * How the user proved who they were for this action, or "" for entries written before
+     * this was recorded (and for actions that never asked).
+     *
+     * Kept because "正規表示（復号）" reads identically whether a fingerprint was
+     * presented or nothing was: on a device with no screen lock every such entry was of the
+     * second kind, and the log gave the owner no way to see it.
+     */
+    val auth: String = ""
 )
 
 /**

@@ -71,6 +71,7 @@ fun AccessLogScreen(
     val activity = remember(context) { context.findFragmentActivity() }
 
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showNoAuthConfirm by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) { viewModel.refreshAccessLog() }
 
@@ -82,12 +83,30 @@ fun AccessLogScreen(
         }
         BiometricGate.authenticate(act) { result ->
             when (result) {
-                is BiometricGate.Result.Success, is BiometricGate.Result.NotConfigured ->
-                    showDeleteConfirm = true
+                is BiometricGate.Result.Success -> showDeleteConfirm = true
                 is BiometricGate.Result.Failed ->
                     Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
+                // Erasing the audit trail used to pass unverified without a word.
+                is BiometricGate.Result.NotConfigured -> showNoAuthConfirm = true
             }
         }
+    }
+
+    if (showNoAuthConfirm) {
+        NoAuthConfirmDialog(
+            actionLabel = "履歴を削除",
+            onProceed = {
+                showNoAuthConfirm = false
+                showDeleteConfirm = true
+            },
+            onDismiss = { showNoAuthConfirm = false },
+            onOpenSettings = {
+                showNoAuthConfirm = false
+                if (!openSecuritySettings(context)) {
+                    Toast.makeText(context, "設定画面を開けませんでした", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
     }
 
     Scaffold(
@@ -129,7 +148,9 @@ fun AccessLogScreen(
                             .padding(horizontal = 16.dp, vertical = 10.dp)
                     ) {
                         Text(
-                            "${formatter.format(Date(entry.timestamp))}　${AccessActions.label(entry.action)}",
+                            "${formatter.format(Date(entry.timestamp))}　${AccessActions.label(entry.action)}" +
+                                // Blank on entries written before the method was recorded.
+                                entry.auth.let { if (it.isBlank()) "" else "　/　$it" },
                             style = MaterialTheme.typography.titleSmall
                         )
                         Text(
@@ -213,7 +234,9 @@ private fun ArchivedMonthRow(
             entries?.forEach { entry ->
                 Column(modifier = Modifier.padding(top = 8.dp, start = 8.dp)) {
                     Text(
-                        "${formatter.format(Date(entry.timestamp))}　${AccessActions.label(entry.action)}",
+                        "${formatter.format(Date(entry.timestamp))}　${AccessActions.label(entry.action)}" +
+                                // Blank on entries written before the method was recorded.
+                                entry.auth.let { if (it.isBlank()) "" else "　/　$it" },
                         style = MaterialTheme.typography.bodyMedium
                     )
                     Text(
