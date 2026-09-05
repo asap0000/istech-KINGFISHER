@@ -785,6 +785,62 @@ class SecurePhotoStore(
      * plaintext file and is retried on the next launch, so a bad record can never cost the
      * user their metadata. (Same shape as the access-log migration above.)
      */
+    /**
+     * Rewrites every encrypted file under the store with [encryptNew].
+     *
+     * Used when the master key changes hands — moving the library from the old
+     * AndroidKeyStore key to one held by [com.istech.privacycamera.crypto.MasterKeyVault].
+     * The key inside the keystore cannot be exported, so re-encrypting is the only way
+     * across; there is no wrapping trick that avoids it.
+     *
+     * **Interrupting this does not break the library.** Each file is written whole and moved
+     * into place, so no file is ever half-converted, and [decryptAny] is expected to try both
+     * keys — which leaves a half-finished run readable under either one. Running it again
+     * simply finishes the job: converted files decrypt with the new key and are rewritten
+     * with the same key, unchanged. That property is deliberate. The alternative, a run that
+     * must complete or else, is how a library of ID documents gets lost to a flat battery.
+     *
+     * Masked previews are not touched: they are already the redacted version, stored as
+     * ordinary JPEGs, and hold nothing the original does not.
+     *
+     * @return how many files were rewritten
+     */
+    fun reencryptAll(
+        decryptAny: (ByteArray) -> ByteArray,
+        encryptNew: (ByteArray) -> ByteArray,
+        onProgress: (done: Int, total: Int) -> Unit = { _, _ -> }
+    ): Int {
+        val files = encryptedFiles()
+        onProgress(0, files.size)
+        var done = 0
+        for (file in files) {
+            try {
+                val plain = decryptAny(file.readBytes())
+                val tmp = File(file.parentFile, "${file.name}.rewrap.${System.nanoTime()}")
+                tmp.writeBytes(encryptNew(plain))
+                if (!tmp.renameTo(file)) {
+                    file.writeBytes(tmp.readBytes())
+                }
+                tmp.delete()
+                done++
+            } catch (e: Exception) {
+                // Unreadable under either key: leave it exactly as it is. Overwriting it
+                // with something derived from a failed read would destroy what is there.
+            }
+            onProgress(done, files.size)
+        }
+        return done
+    }
+
+    /** Every file the store keeps encrypted, in a stable order. */
+    private fun encryptedFiles(): List<File> =
+        baseDir.walkTopDown()
+            .filter { it.isFile && it.name.endsWith(".enc") }
+            // Half-written staging files from an interrupted write are not the library.
+            .filterNot { it.name.contains(".tmp.") || it.name.contains(".rewrap.") }
+            .sortedBy { it.absolutePath }
+            .toList()
+
     fun migratePlaintextToEncrypted() {
         migrateCategoriesToEncrypted()
         listOf(metaDir, trashMetaDir).forEach { dir ->
