@@ -38,10 +38,19 @@ class KensaImeWidthMatrixTest {
 
     @Before
     fun resetToFirstLaunch() {
-        val clearResult = device.executeShellCommand("pm clear $packageName").trim()
-        check(clearResult == "Success") { "Could not clear test data for $packageName: $clearResult" }
+        device.pressHome()
+        device.waitForIdle()
         device.executeShellCommand("pm grant $packageName android.permission.CAMERA")
         launchApp(clearTask = true)
+
+        val initialScreen = await(
+            By.text(Pattern.compile("^(ロックされています|暗証番号を決めてください)$")),
+            "vault lock or first-run PIN setup"
+        )
+        if (initialScreen.text == "ロックされています") {
+            await(By.text("暗証番号を忘れた"), "forgot passphrase button").click()
+            await(By.text("すべて消して作り直す"), "reset vault confirmation").click()
+        }
         await(By.text("暗証番号を決めてください"), "first-run PIN setup")
     }
 
@@ -74,6 +83,13 @@ class KensaImeWidthMatrixTest {
         fields[1].setText(pin)
         await(By.text("この暗証番号にする"), "PIN setup button").click()
         device.waitForIdle()
+
+        check(
+            device.wait(
+                Until.gone(By.text("暗証番号を決めてください")),
+                LONG_WAIT
+            )
+        ) { "PIN setup did not finish" }
 
         // Biometric enrollment is optional; dismiss it so this matrix remains PIN-only.
         if (!device.wait(Until.hasObject(By.desc("保護フォルダを開く")), SHORT_WAIT)) {

@@ -91,6 +91,13 @@ class KensaColdStartSmokeTest {
             fields[1].text = TEST_PIN
             clickText("この暗証番号にする", "PIN setup")
 
+            check(
+                device.wait(
+                    Until.gone(By.text("暗証番号を決めてください")),
+                    LONG_WAIT
+                )
+            ) { "PIN setup did not finish" }
+
             // A configured biometric device may offer enrollment. Dismissing it leaves the
             // passphrase path enabled and keeps this smoke test device-independent.
             if (!device.wait(Until.hasObject(By.desc("保護フォルダを開く")), SHORT_WAIT)) {

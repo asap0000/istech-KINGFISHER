@@ -115,6 +115,13 @@ class KensaRelockMatrixTest {
             await(By.text("この暗証番号にする"), "PIN setup button").click()
             device.waitForIdle()
 
+            check(
+                device.wait(
+                    Until.gone(By.text("暗証番号を決めてください")),
+                    LONG_WAIT
+                )
+            ) { "PIN setup did not finish" }
+
             // Dismiss optional biometric enrollment to keep this increment PIN-only.
             if (!device.wait(Until.hasObject(By.desc("保護フォルダを開く")), SHORT_WAIT)) {
                 device.pressBack()
