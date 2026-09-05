@@ -13,6 +13,7 @@ android {
         applicationId = "com.istech.privacycamera"
         minSdk = 26
         targetSdk = 35
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // versionCode/versionName are injected by CI (see .github/workflows/release.yml)
         // so distributed builds auto-increment without manual edits. Local/CI debug builds
         // fall back to the defaults below.
@@ -33,6 +34,14 @@ android {
     val hasReleaseSigning = releaseKeystoreFile.exists() &&
         !System.getenv("RELEASE_STORE_PASSWORD").isNullOrEmpty()
 
+    // Kensa builds use their own identity and signing key so they can coexist with
+    // the distributed app on the same device without risking the release key.
+    val kensaKeystorePath =
+        System.getenv("KENSA_KEYSTORE_PATH") ?: "kensa.keystore"
+    val kensaKeystoreFile = file(kensaKeystorePath)
+    val hasKensaSigning = kensaKeystoreFile.exists() &&
+        !System.getenv("KENSA_STORE_PASSWORD").isNullOrEmpty()
+
     signingConfigs {
         if (hasReleaseSigning) {
             create("release") {
@@ -44,6 +53,16 @@ android {
                 // is ignored at creation time). Use the store password directly so signing
                 // can't be broken by a stale/incorrect RELEASE_KEY_PASSWORD secret.
                 keyPassword = System.getenv("RELEASE_STORE_PASSWORD")
+            }
+        }
+        if (hasKensaSigning) {
+            create("kensa") {
+                storeFile = kensaKeystoreFile
+                storePassword = System.getenv("KENSA_STORE_PASSWORD")
+                keyAlias = System.getenv("KENSA_KEY_ALIAS")
+                // The kensa keystore is PKCS12, so its key password is necessarily
+                // identical to its store password, just like the release keystore.
+                keyPassword = System.getenv("KENSA_STORE_PASSWORD")
             }
         }
     }
@@ -59,7 +78,23 @@ android {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
+        create("kensa") {
+            initWith(getByName("release"))
+            applicationIdSuffix = ".kensa"
+            versionNameSuffix = "-kensa"
+            // initWith copies the release build type wholesale — including its signing
+            // config. Left alone, a machine that has the release keystore but no kensa one
+            // (CI, or a local shell missing KENSA_STORE_PASSWORD) signs the inspection build
+            // with the distribution key: measured, `signingReport` reported proKensa as
+            // Config: release. For a sideloaded product that is the worst kind of mix-up,
+            // so the assignment below is unconditional. With no kensa key the build comes
+            // out unsigned and refuses to install, which is the failure we want.
+            signingConfig = if (hasKensaSigning) signingConfigs.getByName("kensa") else null
+        }
     }
+
+    // Run instrumentation against the non-debuggable build that is actually inspected.
+    testBuildType = "kensa"
 
     // Two product tiers shipped from one codebase:
     //   lite -> free; capped local storage, encrypted one-way export, no masking
@@ -164,4 +199,9 @@ dependencies {
     testImplementation(libs.compose.ui.test.junit4)
     testImplementation(libs.roborazzi)
     testImplementation(libs.roborazzi.compose)
+
+    // Black-box instrumentation for the non-debuggable kensa build.
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit.ktx)
+    androidTestImplementation(libs.androidx.test.uiautomator)
 }
