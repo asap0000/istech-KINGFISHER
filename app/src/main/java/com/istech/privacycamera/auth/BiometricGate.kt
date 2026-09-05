@@ -16,6 +16,8 @@
 package com.istech.privacycamera.auth
 
 import android.content.Context
+import android.os.Build
+import javax.crypto.Cipher
 import androidx.biometric.BiometricManager
 import androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG
 import androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL
@@ -33,6 +35,7 @@ import androidx.fragment.app.FragmentActivity
 object BiometricGate {
 
     private const val AUTHENTICATORS = BIOMETRIC_STRONG or DEVICE_CREDENTIAL
+    private const val DEFAULT_SUBTITLE = "正規の内容を表示するには認証が必要です"
 
     /**
      * True while a system biometric/credential prompt is on screen. The app-lock uses this
@@ -79,9 +82,26 @@ object BiometricGate {
     fun authenticate(
         activity: FragmentActivity,
         onResult: (Result) -> Unit
+    ) = authenticate(activity, null, DEFAULT_SUBTITLE) { result, _ -> onResult(result) }
+
+    /**
+     * Authenticates and hands back the [crypto] cipher, now usable.
+     *
+     * This is the form the vault's fingerprint shortcut needs. A cipher from an
+     * authentication-bound keystore key will not perform until `BiometricPrompt` has run it
+     * through a successful verification — which is what makes the shortcut a real check
+     * rather than another screen that can be stepped around.
+     *
+     * [crypto] is null for the plain gate, where nothing is being unwrapped.
+     */
+    fun authenticate(
+        activity: FragmentActivity,
+        crypto: Cipher?,
+        subtitle: String,
+        onResult: (Result, Cipher?) -> Unit
     ) {
         if (!canAuthenticate(activity)) {
-            onResult(Result.NotConfigured)
+            onResult(Result.NotConfigured, null)
             return
         }
 
@@ -101,27 +121,41 @@ object BiometricGate {
                             AuthMethod.DEVICE_CREDENTIAL
                         else -> AuthMethod.UNKNOWN
                     }
-                    onResult(Result.Success(method))
+                    onResult(Result.Success(method), result.cryptoObject?.cipher)
                 }
 
                 override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
                     // User cancelled or a hard error occurred.
                     isPrompting = false
-                    onResult(Result.Failed)
+                    onResult(Result.Failed, null)
                 }
                 // onAuthenticationFailed (a single mismatched attempt) intentionally
                 // does nothing so the user can retry within the same prompt.
             }
         )
 
+        // A crypto-backed prompt cannot allow DEVICE_CREDENTIAL below API 30, and the
+        // shortcut's key is bound to biometrics anyway; without a cipher the gate keeps the
+        // device PIN as its fallback, which is what makes it work on a phone with no
+        // fingerprint reader.
+        val authenticators =
+            if (crypto != null && Build.VERSION.SDK_INT < Build.VERSION_CODES.R) BIOMETRIC_STRONG
+            else AUTHENTICATORS
         val info = BiometricPrompt.PromptInfo.Builder()
             .setTitle("本人確認")
-            .setSubtitle("正規の内容を表示するには認証が必要です")
+            .setSubtitle(subtitle)
             // Note: setNegativeButtonText must NOT be set when DEVICE_CREDENTIAL is allowed.
-            .setAllowedAuthenticators(AUTHENTICATORS)
+            .apply {
+                setAllowedAuthenticators(authenticators)
+                if (authenticators == BIOMETRIC_STRONG) setNegativeButtonText("暗証番号を使う")
+            }
             .build()
 
         isPrompting = true
-        prompt.authenticate(info)
+        if (crypto != null) {
+            prompt.authenticate(info, BiometricPrompt.CryptoObject(crypto))
+        } else {
+            prompt.authenticate(info)
+        }
     }
 }

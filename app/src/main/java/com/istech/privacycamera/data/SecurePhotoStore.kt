@@ -832,6 +832,23 @@ class SecurePhotoStore(
         return done
     }
 
+    /**
+     * Deletes the whole library — originals, masked previews, metadata, trash, log.
+     *
+     * Only reached from the passphrase reset, where the user has been told in as many words
+     * that the photos go with it. Someone who has forgotten their passphrase otherwise has a
+     * library they can never open and can never clear; that dead end is worse than this.
+     */
+    fun eraseEverything() {
+        baseDir.listFiles()?.forEach { entry ->
+            // Keep the keys folder: the vault erases its own wrappings, and deleting them
+            // from under it would leave a half-reset state neither side owns.
+            if (entry.name != "keys") entry.deleteRecursively()
+        }
+        listOf(originalsDir, maskedDir, metaDir, trashDir, trashOriginalsDir, trashMaskedDir,
+            trashMetaDir, logArchiveDir).forEach { it.mkdirs() }
+    }
+
     /** Every file the store keeps encrypted, in a stable order. */
     private fun encryptedFiles(): List<File> =
         baseDir.walkTopDown()

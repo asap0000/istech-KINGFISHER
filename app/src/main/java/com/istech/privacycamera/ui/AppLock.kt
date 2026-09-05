@@ -34,11 +34,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -49,6 +51,8 @@ import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.istech.privacycamera.viewmodel.VaultViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.istech.privacycamera.auth.BiometricGate
@@ -67,56 +71,68 @@ private const val AUTO_LOCK_MS = 120_000L
  */
 @Composable
 fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
-    var lockState by remember { mutableStateOf(LockState.LOCKED) }
-    // Set once the device has told us it has nothing to authenticate against. The lock
-    // screen then says so permanently instead of unlocking as if a check had happened:
-    // the state lasts as long as the device setting does, so a Toast is the wrong shape.
-    var noAuthAvailable by remember { mutableStateOf(false) }
+    val vaultModel: VaultViewModel = viewModel()
+    val stage by vaultModel.stage.collectAsState()
+    val migration by vaultModel.migration.collectAsState()
+    val attemptFailed by vaultModel.lastAttemptFailed.collectAsState()
+    val lockedOutFor by vaultModel.lockedOutFor.collectAsState()
+    var showReset by remember { mutableStateOf(false) }
     var lastInteraction by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
-    fun promptAuth() {
-        if (lockState == LockState.AUTHENTICATING) return
-        lockState = LockState.AUTHENTICATING
-        BiometricGate.authenticate(activity) { result ->
-            lockState = when (result) {
-                is BiometricGate.Result.Success -> LockState.UNLOCKED
-                is BiometricGate.Result.NotConfigured -> {
-                    // Stay locked and say why, instead of opening as though a check had
-                    // happened. Unlocking here made the warning unreachable: the lock screen
-                    // that carries it was already gone by the time it was set (measured on a
-                    // device with no screen lock — the app went straight to the camera).
-                    noAuthAvailable = true
-                    LockState.LOCKED
-                }
-                is BiometricGate.Result.Failed -> LockState.LOCKED
-            }
-            if (lockState == LockState.UNLOCKED) {
-                lastInteraction = SystemClock.elapsedRealtime()
+    val lockState = when (stage) {
+        VaultViewModel.Stage.OPEN -> LockState.UNLOCKED
+        VaultViewModel.Stage.MIGRATING -> LockState.AUTHENTICATING
+        else -> LockState.LOCKED
+    }
+
+    /**
+     * The fingerprint shortcut. The cipher only performs once BiometricPrompt has verified
+     * the user, so this is a real check rather than a screen in front of an open key.
+     */
+    fun useShortcut() {
+        val cipher = vaultModel.shortcutCipher()
+        if (cipher == null) {
+            // The keystore key is gone (screen lock removed, or a new fingerprint enrolled).
+            // The passphrase field is already on screen, which is the whole point of keeping
+            // two wrappings.
+            vaultModel.dropShortcut()
+            return
+        }
+        BiometricGate.authenticate(
+            activity,
+            cipher,
+            "写真を開くには認証が必要です"
+        ) { result, authenticated ->
+            if (result is BiometricGate.Result.Success && authenticated != null) {
+                if (!vaultModel.unlockWithShortcut(authenticated)) vaultModel.dropShortcut()
             }
         }
     }
 
     val lifecycleOwner = LocalLifecycleOwner.current
+    // The observer below is built once and keeps whatever it captured. `stage` is derived
+    // fresh on every recomposition, so capturing it directly freezes the value from the
+    // first pass — which is how the app stopped re-locking when it went to the background
+    // (measured on a device: sent to home while open, came back still open).
+    val openNow by rememberUpdatedState(stage == VaultViewModel.Stage.OPEN)
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
-                Lifecycle.Event.ON_START -> if (lockState == LockState.LOCKED) promptAuth()
+                // Nothing to do on start: the stage already says whether a key is held.
+                Lifecycle.Event.ON_START -> Unit
                 // Lock as early as ON_PAUSE — this fires BEFORE the system grabs the
                 // recents/overview snapshot, so the (possibly revealed) content is covered
                 // by the lock screen before it can leak into the task switcher. Skip it
                 // while our own auth prompt is up, since that prompt also pauses us and we
                 // must not re-lock underneath an in-progress reveal/unlock.
                 Lifecycle.Event.ON_PAUSE ->
-                    if (lockState == LockState.UNLOCKED &&
-                        !BiometricGate.isPrompting &&
-                        !BackupGate.isRunning
-                    ) {
-                        lockState = LockState.LOCKED
+                    if (openNow && !BiometricGate.isPrompting && !BackupGate.isRunning) {
+                        vaultModel.lock()
                     }
                 // Belt-and-suspenders for any path that stops without pausing first.
                 Lifecycle.Event.ON_STOP ->
-                    if (lockState == LockState.UNLOCKED && !BackupGate.isRunning) {
-                        lockState = LockState.LOCKED
+                    if (openNow && !BackupGate.isRunning) {
+                        vaultModel.lock()
                     }
                 else -> {}
             }
@@ -138,7 +154,7 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                     continue
                 }
                 if (SystemClock.elapsedRealtime() - lastInteraction >= AUTO_LOCK_MS) {
-                    lockState = LockState.LOCKED
+                    vaultModel.lock()
                     break
                 }
             }
@@ -167,19 +183,61 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
             content()
         }
 
-        if (lockState != LockState.UNLOCKED) {
-            // Opaque, full-screen cover so the protected content is never visible
-            // (and stays uninteractive) while locked.
-            LockScreen(
-                authenticating = lockState == LockState.AUTHENTICATING,
-                noAuthAvailable = noAuthAvailable,
-                // With nothing to authenticate against, the button is the user's own
-                // acknowledgement — prompting again would only repeat the same answer.
-                onUnlock = {
-                    if (noAuthAvailable) lockState = LockState.UNLOCKED else promptAuth()
-                },
-                onOpenSettings = { openSecuritySettings(activity) }
+        // Opaque, full-screen cover so the protected content is never visible (and stays
+        // uninteractive) until a key is actually in hand.
+        when (stage) {
+            VaultViewModel.Stage.SETUP -> VaultSetupScreen(
+                hasExistingLibrary = vaultModel.libraryNeedsMigration(),
+                onSubmit = { pass ->
+                    vaultModel.setUp(pass) { ok ->
+                        if (ok) enrollShortcutIfPossible(activity, vaultModel)
+                    }
+                }
             )
+
+            VaultViewModel.Stage.LOCKED -> VaultUnlockScreen(
+                showShortcut = vaultModel.hasShortcut,
+                lastAttemptFailed = attemptFailed,
+                lockedOutFor = lockedOutFor,
+                onSubmit = { vaultModel.unlock(it) },
+                onUseShortcut = { useShortcut() },
+                onForgot = { showReset = true }
+            )
+
+            VaultViewModel.Stage.MIGRATING ->
+                VaultMigrationScreen(done = migration.first, total = migration.second)
+
+            VaultViewModel.Stage.OPEN -> Unit
+        }
+
+        if (showReset) {
+            ForgotPassphraseDialog(
+                onConfirm = {
+                    showReset = false
+                    vaultModel.resetEverything { }
+                },
+                onDismiss = { showReset = false }
+            )
+        }
+    }
+}
+
+/**
+ * Offers the fingerprint shortcut right after the passphrase is set, while the master key is
+ * in hand — the only moment it can be wrapped without asking for the passphrase again.
+ *
+ * Silently skipped where the device has nothing to authenticate against. That is not a
+ * failure: the passphrase carries the whole job there, which is the case this design is for.
+ */
+private fun enrollShortcutIfPossible(activity: FragmentActivity, model: VaultViewModel) {
+    val cipher = model.enrollCipher() ?: return
+    BiometricGate.authenticate(
+        activity,
+        cipher,
+        "次回から指紋で開けるようにします"
+    ) { result, authenticated ->
+        if (result is BiometricGate.Result.Success && authenticated != null) {
+            model.completeEnrollment(authenticated)
         }
     }
 }

@@ -129,11 +129,26 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
 
     init {
-        // The plaintext -> encrypted migration touches every stored record and each record costs
-        // a Keystore round trip, so it must not run on the main thread: a Pro library with
-        // hundreds of photos would block the first frame long enough to ANR. Reads fall back
-        // to the plaintext form while it is in flight, so starting it alongside the first
-        // load is safe.
+        // Nothing here runs until the vault is open. Before that there is no key, so a read
+        // returns nothing and a write throws — which is exactly what happened when this
+        // started eagerly: the app crashed on launch with "vault is closed", because the
+        // plaintext migration below tried to encrypt while the lock screen was still up.
+        viewModelScope.launch {
+            application.vaultSession.isOpenFlow.collect { open ->
+                if (open) startUp()
+            }
+        }
+    }
+
+    /**
+     * First load, once a key is in hand.
+     *
+     * The plaintext -> encrypted migration touches every stored record and each record costs a
+     * round trip, so it must not run on the main thread: a Pro library with hundreds of photos
+     * would block the first frame long enough to ANR. Reads fall back to the plaintext form
+     * while it is in flight, so starting it alongside the first load is safe.
+     */
+    private fun startUp() {
         viewModelScope.launch {
             withContext(Dispatchers.IO) { store.migratePlaintextToEncrypted() }
             refresh()

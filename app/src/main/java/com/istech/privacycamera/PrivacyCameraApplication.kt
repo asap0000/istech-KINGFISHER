@@ -16,14 +16,34 @@
 package com.istech.privacycamera
 
 import android.app.Application
+import com.istech.privacycamera.crypto.MasterKeyVault
+import com.istech.privacycamera.crypto.VaultSession
 import com.istech.privacycamera.data.AppSettings
 import com.istech.privacycamera.data.SecurePhotoStore
+import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 
 class PrivacyCameraApplication : Application() {
-    val photoStore: SecurePhotoStore by lazy { SecurePhotoStore(this) }
+    /** Where the wrapped master key lives. Beside the library it opens, inside app storage. */
+    private val keysDir: File by lazy { File(filesDir, "secure/keys") }
+
+    /** The passphrase-and-fingerprint vault holding the key to the library. */
+    val vault: MasterKeyVault by lazy { MasterKeyVault(keysDir) }
+
+    /** The master key for as long as the app is open; empty until somebody unlocks it. */
+    val vaultSession: VaultSession by lazy { VaultSession(keysDir) }
+
+    /**
+     * The library, read and written through whatever key the session currently holds.
+     *
+     * Reading a photo is now impossible until the vault is open — which is the point of the
+     * change: authentication used to be a screen in front of a key that worked regardless.
+     */
+    val photoStore: SecurePhotoStore by lazy {
+        SecurePhotoStore(this, vaultSession::encrypt, vaultSession::decrypt)
+    }
     val appSettings: AppSettings by lazy { AppSettings(this) }
 
     /**

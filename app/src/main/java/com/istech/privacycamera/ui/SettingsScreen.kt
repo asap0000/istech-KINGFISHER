@@ -134,6 +134,10 @@ fun SettingsScreen(
 
             HorizontalDivider()
 
+            VaultSettingsSection(activity = activity, vaultModel = viewModel())
+
+            HorizontalDivider()
+
             TextButton(
                 onClick = {
                     viewModel.hideSettingsAgain()
