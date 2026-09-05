@@ -26,6 +26,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Ignore
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -37,17 +38,36 @@ import org.junit.runner.RunWith
  * rows is out of scope because valid encrypted records cannot be prepared without the vault key.
  * UiAutomator is used because the release-like kensa APK is not debuggable.
  *
- * **Quarantined — not counted towards pass/fail** (kensa ledger, A-3 row). Both cases time
- * out at varying points; the inspection seat is still tracking down why.
+ * **Disabled: the approach cannot work anywhere** (kensa ledger, A-3 row).
  *
- * **It also cannot run on a retail handset at all**, which is worth knowing before the next
- * attempt. The [runAs] helper below reaches the app's private files through `run-as`, and
- * that command refuses any package without the DEBUGGABLE flag — which the kensa build,
- * deriving from release, does not carry. Measured on OPPO CPH2013 (2026-09-06):
- * `run-as: package not debuggable: com.istech.privacycamera.kensa`, with the device reporting
- * `ro.debuggable=0` / `ro.build.type=user`. Emulator images ship `ro.debuggable=1`, where the
- * same call is permitted, so this limit is invisible until the test meets a real phone.
+ * The [runAs] helper below reaches the app's private files through `run-as`, and that command
+ * requires the *target package* to carry the DEBUGGABLE flag. The kensa build derives from
+ * release and deliberately does not. A permissive device does not lift that: what matters is
+ * the package, not the phone.
+ *
+ * Measured 2026-09-06, both ends of the range:
+ *
+ * ```
+ * OPPO CPH2013   ro.debuggable=0  build.type=user
+ *   run-as com.istech.privacycamera.kensa  -> package not debuggable
+ * AVD (API 35)   ro.debuggable=1  build.type=userdebug
+ *   run-as com.istech.privacycamera.kensa  -> package not debuggable
+ *   run-as com.istech.privacycamera        -> cache code_cache files   (debug build, works)
+ * ```
+ *
+ * The last line is the control: on that same emulator a debuggable package answers, so the
+ * refusal tracks the package rather than the device. An earlier revision of this comment said
+ * emulators permit the call and the limit only shows on real hardware — that was written from
+ * inference rather than measurement, and it was wrong.
+ *
+ * Reviving A-3 therefore means dropping `run-as` and checking state through the UI, the way
+ * the other three kensa tests do (thumbnail counts in the gallery, and so on). The body is
+ * kept rather than deleted because the flows it drives — capture, memo dialog, bulk data —
+ * are the ones a rewrite still needs.
  */
+@Ignore(
+    "run-as cannot reach a non-debuggable package on any device; A-3 needs rebuilding on UI checks"
+)
 @RunWith(AndroidJUnit4::class)
 class KensaKeyDataMatrixTest {
     private val instrumentation = InstrumentationRegistry.getInstrumentation()
