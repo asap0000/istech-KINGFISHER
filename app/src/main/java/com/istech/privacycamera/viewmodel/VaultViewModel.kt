@@ -21,6 +21,7 @@ import androidx.lifecycle.viewModelScope
 import com.istech.privacycamera.PrivacyCameraApplication
 import com.istech.privacycamera.crypto.MasterKeyVault
 import javax.crypto.Cipher
+import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -35,7 +36,23 @@ import kotlinx.coroutines.withContext
  * Kept apart from [PhotoViewModel] on purpose: everything here runs *before* there is a key,
  * so it cannot lean on the photo store the way the rest of the app does.
  */
-class VaultViewModel(app: Application) : AndroidViewModel(app) {
+class VaultViewModel @JvmOverloads constructor(
+    app: Application,
+    /**
+     * Where the blocking work runs — key derivation and re-encryption both touch the disk.
+     *
+     * Injectable so tests can drive it deterministically: with the real IO dispatcher a test
+     * has no way to wait for these, and every assertion about [stage] races the work it is
+     * describing.
+     *
+     * `@JvmOverloads` is not decoration. `AndroidViewModelFactory` finds the constructor by
+     * reflection and looks for one taking exactly an `Application`; a default value is a
+     * Kotlin-side convenience the factory cannot see, so without the generated overload the
+     * app dies on launch with "Cannot create an instance" — while every test, which calls
+     * the two-argument form directly, still passes.
+     */
+    private val io: CoroutineDispatcher = Dispatchers.IO
+) : AndroidViewModel(app) {
 
     /** Where the app is in the sequence of getting the library open. */
     enum class Stage {
@@ -73,8 +90,14 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
 
     val hasShortcut: Boolean get() = vault.hasBiometricShortcut()
 
-    /** True while an older library is still encrypted with the pre-vault key. */
-    fun libraryNeedsMigration(): Boolean = session.needsMigration()
+    /**
+     * True while an older library is still encrypted with the pre-vault key.
+     *
+     * Both halves matter. The mark alone says a migration is pending, but after a reset there
+     * is nothing left to migrate — and the setup screen would then promise to "protect your
+     * existing photos again" on an empty library, which is simply untrue.
+     */
+    fun libraryNeedsMigration(): Boolean = session.needsMigration() && store.hasStoredFiles()
 
     /**
      * Sets the first passphrase and opens the vault.
@@ -84,7 +107,7 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun setUp(passphrase: CharArray, onDone: (Boolean) -> Unit = {}) {
         viewModelScope.launch {
-            val ok = withContext(Dispatchers.IO) {
+            val ok = withContext(io) {
                 try {
                     session.open(vault.initialize(passphrase))
                     true
@@ -107,7 +130,7 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
                 _lockedOutFor.value = waitFor
                 return@launch
             }
-            val key = withContext(Dispatchers.IO) {
+            val key = withContext(io) {
                 try {
                     vault.unlockWithPassphrase(passphrase)
                 } finally {
@@ -176,7 +199,7 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
      */
     fun resetEverything(onDone: () -> Unit) {
         viewModelScope.launch {
-            withContext(Dispatchers.IO + NonCancellable) {
+            withContext(io + NonCancellable) {
                 store.eraseEverything()
                 vault.reset()
                 session.close()
@@ -199,7 +222,7 @@ class VaultViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         _stage.value = Stage.MIGRATING
-        withContext(Dispatchers.IO + NonCancellable) {
+        withContext(io + NonCancellable) {
             store.reencryptAll(
                 decryptAny = session::decrypt,
                 encryptNew = session::encrypt,

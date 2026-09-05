@@ -849,6 +849,9 @@ class SecurePhotoStore(
             trashMetaDir, logArchiveDir).forEach { it.mkdirs() }
     }
 
+    /** True when the store holds anything encrypted at all — asked before promising a migration. */
+    fun hasStoredFiles(): Boolean = encryptedFiles().isNotEmpty()
+
     /** Every file the store keeps encrypted, in a stable order. */
     private fun encryptedFiles(): List<File> =
         baseDir.walkTopDown()
