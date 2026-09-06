@@ -90,9 +90,18 @@ class VaultViewModel @JvmOverloads constructor(
 
     val hasShortcut: Boolean get() = vault.hasBiometricShortcut()
 
-    /** Set when the app went to the background mid-migration; applied once the rewrite ends. */
+    /**
+     * True while a key is being produced or the library is being rewritten.
+     *
+     * Covers the whole stretch in which the vault is on its way open but [stage] does not say
+     * so yet: passphrase derivation (PBKDF2, 120k rounds) and the migration that follows.
+     */
     @Volatile
-    private var lockRequestedDuringMigration = false
+    private var openingInProgress = false
+
+    /** Set when the app went to the background mid-open; applied once that work ends. */
+    @Volatile
+    private var lockRequestedWhileOpening = false
 
     /**
      * True while an older library is still encrypted with the pre-vault key.
@@ -110,6 +119,7 @@ class VaultViewModel @JvmOverloads constructor(
      * with the old key, and leaving it that way would mean the new passphrase guards nothing.
      */
     fun setUp(passphrase: CharArray, onDone: (Boolean) -> Unit = {}) {
+        openingInProgress = true
         viewModelScope.launch {
             val ok = withContext(io) {
                 try {
@@ -121,8 +131,14 @@ class VaultViewModel @JvmOverloads constructor(
                     passphrase.fill(' ')
                 }
             }
-            if (ok) migrateThenOpen() else onDone(false)
-            if (ok) onDone(true)
+            if (ok) {
+                migrateThenOpen()
+                onDone(true)
+            } else {
+                openingInProgress = false
+                lockRequestedWhileOpening = false
+                onDone(false)
+            }
         }
     }
 
@@ -134,6 +150,13 @@ class VaultViewModel @JvmOverloads constructor(
                 _lockedOutFor.value = waitFor
                 return@launch
             }
+            // Deriving the key takes long enough to leave on screen (PBKDF2, 120k rounds),
+            // and the user can reach the home button in that window. Measured by the
+            // inspection seat on a slow AVD (2026-09-06): unlock tapped, home pressed 0.96s
+            // later, and the app came back open because the stage was still LOCKED when
+            // ON_PAUSE arrived, so the lock request was dropped and this coroutine went on
+            // to open the library over it.
+            openingInProgress = true
             val key = withContext(io) {
                 try {
                     vault.unlockWithPassphrase(passphrase)
@@ -142,6 +165,8 @@ class VaultViewModel @JvmOverloads constructor(
                 }
             }
             if (key == null) {
+                openingInProgress = false
+                lockRequestedWhileOpening = false
                 _lastAttemptFailed.value = true
                 _lockedOutFor.value = vault.nextAttemptAllowedIn()
                 return@launch
@@ -165,6 +190,7 @@ class VaultViewModel @JvmOverloads constructor(
      */
     fun unlockWithShortcut(cipher: Cipher): Boolean {
         val key = vault.completeUnlock(cipher) ?: return false
+        openingInProgress = true
         session.open(key)
         viewModelScope.launch { migrateThenOpen() }
         return true
@@ -227,8 +253,8 @@ class VaultViewModel @JvmOverloads constructor(
      * presses home, and coming back shows the library without a lock screen.
      */
     fun lock() {
-        if (_stage.value == Stage.MIGRATING) {
-            lockRequestedDuringMigration = true
+        if (openingInProgress) {
+            lockRequestedWhileOpening = true
             return
         }
         session.close()
@@ -237,7 +263,7 @@ class VaultViewModel @JvmOverloads constructor(
 
     private suspend fun migrateThenOpen() {
         if (!session.needsMigration()) {
-            _stage.value = Stage.OPEN
+            finishOpening()
             return
         }
         _stage.value = Stage.MIGRATING
@@ -249,9 +275,17 @@ class VaultViewModel @JvmOverloads constructor(
             )
             session.markMigrated()
         }
-        // Honour a lock that arrived while this was running, instead of opening over it.
-        if (lockRequestedDuringMigration) {
-            lockRequestedDuringMigration = false
+        finishOpening()
+    }
+
+    /**
+     * Ends the opening stretch: either open the library, or honour a lock that arrived while
+     * it was in progress.
+     */
+    private fun finishOpening() {
+        openingInProgress = false
+        if (lockRequestedWhileOpening) {
+            lockRequestedWhileOpening = false
             session.close()
             _stage.value = if (vault.isInitialized()) Stage.LOCKED else Stage.SETUP
         } else {

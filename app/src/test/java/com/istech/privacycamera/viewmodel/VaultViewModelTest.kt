@@ -201,6 +201,31 @@ class VaultViewModelTest {
     }
 
     @Test
+    fun `解錠の途中で背景へ送られたら、開かずにロックのままにする`() = runTest(dispatcher) {
+        // 検査場が kensa-31 で捕まえた側。暗証番号から鍵を作るのは PBKDF2 12万回で、
+        // 実測 0.96 秒のうちにホームを押せる。その間 stage は LOCKED のままなので、
+        // 以前は ON_PAUSE のロック要求が落ちたうえ、解錠が完了して OPEN で上書きして
+        // いた——戻るとロック画面を経ずに中身が見える。
+        VaultViewModel(app, dispatcher).also { it.setUp(pin) }
+        advanceUntilIdle()
+
+        val ioScheduler = TestCoroutineScheduler()
+        val model = VaultViewModel(app, StandardTestDispatcher(ioScheduler))
+        model.unlock(pin)
+        runCurrent() // 鍵の導出が IO 側へ渡ったところ。画面はまだ「ロックされています」
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.LOCKED)
+
+        model.lock() // ここでホームボタン
+
+        ioScheduler.advanceUntilIdle()
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.LOCKED)
+        assertThat(app.vaultSession.isOpen).isFalse()
+    }
+
+    @Test
     fun `作り直すと写真も鍵も消えて設定に戻る`() = runTest(dispatcher) {
         val model = VaultViewModel(app, dispatcher)
         model.setUp(pin)

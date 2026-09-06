@@ -114,12 +114,10 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     // fresh on every recomposition, so capturing it directly freezes the value from the
     // first pass — which is how the app stopped re-locking when it went to the background
     // (measured on a device: sent to home while open, came back still open).
-    // MIGRATING counts as "holding the key" here. The migration runs with the vault open, so
-    // a background transition during it has to be honoured too — the view model defers the
-    // actual lock until the rewrite finishes.
-    val holdingKey by rememberUpdatedState(
-        stage == VaultViewModel.Stage.OPEN || stage == VaultViewModel.Stage.MIGRATING
-    )
+    // No stage test here on purpose. Whether a lock is due depends on work the view model is
+    // doing, not on the stage the screen is showing: a key can be halfway derived while the
+    // stage still reads LOCKED. Sending the request unconditionally and letting the view
+    // model decide is what keeps those in-between moments from being dropped.
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -131,12 +129,12 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 // while our own auth prompt is up, since that prompt also pauses us and we
                 // must not re-lock underneath an in-progress reveal/unlock.
                 Lifecycle.Event.ON_PAUSE ->
-                    if (holdingKey && !BiometricGate.isPrompting && !BackupGate.isRunning) {
+                    if (!BiometricGate.isPrompting && !BackupGate.isRunning) {
                         vaultModel.lock()
                     }
                 // Belt-and-suspenders for any path that stops without pausing first.
                 Lifecycle.Event.ON_STOP ->
-                    if (holdingKey && !BackupGate.isRunning) {
+                    if (!BackupGate.isRunning) {
                         vaultModel.lock()
                     }
                 else -> {}
