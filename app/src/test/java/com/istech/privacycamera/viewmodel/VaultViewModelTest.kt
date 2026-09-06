@@ -23,8 +23,10 @@ import java.io.File
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestCoroutineScheduler
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import org.junit.After
@@ -152,6 +154,50 @@ class VaultViewModelTest {
 
         assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.LOCKED)
         assertThat(app.vaultSession.isOpen).isFalse()
+    }
+
+    @Test
+    fun `移行中に背景へ送られたら、終わってからロックする`() = runTest(dispatcher) {
+        // 検査場が API31/33 で捕まえた穴。設定画面が消えたあとも移行は続いており、
+        // その最中にホームへ行くと ON_PAUSE が来る。以前はここで stage が OPEN でない
+        // ために lock() が素通りし、移行完了が無条件に OPEN で上書きしていた——
+        // 戻るとロック画面を経ずに中身が見える状態だった。
+        val legacyStore = com.istech.privacycamera.data.SecurePhotoStore(
+            app,
+            { "OLD:".toByteArray() + it },
+            { it.copyOfRange(4, it.size) }
+        )
+        legacyStore.importOriginal(
+            jpegBytes = "jpeg".toByteArray(),
+            uuid = "u1",
+            createdAt = 1_700_000_000_000L,
+            caption = "メモ",
+            category = PhotoCategories.UNCLASSIFIED
+        )
+
+        // IO を別スケジューラにして、移行の途中で止められるようにする。同じ
+        // スケジューラだと advanceUntilIdle が一息に走り切り、MIGRATING を捉えられない。
+        val ioScheduler = TestCoroutineScheduler()
+        val model = VaultViewModel(app, StandardTestDispatcher(ioScheduler))
+
+        model.setUp(pin)
+        runCurrent()
+        ioScheduler.advanceUntilIdle() // 鍵の生成まで
+        runCurrent()                   // MIGRATING に入り、書き換えを IO へ渡したところ
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.MIGRATING)
+
+        model.lock()
+        // 移行はまだ走っているので、鍵はこの時点では落とさない。
+        assertThat(app.vaultSession.isOpen).isTrue()
+
+        ioScheduler.advanceUntilIdle()
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.LOCKED)
+        assertThat(app.vaultSession.isOpen).isFalse()
+        // 移行そのものは完走している（やり直しを強いない）。
+        assertThat(model.libraryNeedsMigration()).isFalse()
     }
 
     @Test

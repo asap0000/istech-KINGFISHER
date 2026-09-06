@@ -90,6 +90,10 @@ class VaultViewModel @JvmOverloads constructor(
 
     val hasShortcut: Boolean get() = vault.hasBiometricShortcut()
 
+    /** Set when the app went to the background mid-migration; applied once the rewrite ends. */
+    @Volatile
+    private var lockRequestedDuringMigration = false
+
     /**
      * True while an older library is still encrypted with the pre-vault key.
      *
@@ -210,8 +214,23 @@ class VaultViewModel @JvmOverloads constructor(
         }
     }
 
-    /** Forgets the key, so the library needs opening again. */
+    /**
+     * Forgets the key, so the library needs opening again.
+     *
+     * A request that arrives mid-migration is remembered rather than obeyed on the spot:
+     * dropping the key while [SecurePhotoStore.reencryptAll] is running would stop the
+     * rewrite partway. It is applied the moment the migration finishes.
+     *
+     * Ignoring it outright — which is what happened before — left the app open after the
+     * user had sent it to the background. Measured by the inspection seat on API 31/33
+     * (2026-09-06): the setup screen goes away while the migration is still on, the test
+     * presses home, and coming back shows the library without a lock screen.
+     */
     fun lock() {
+        if (_stage.value == Stage.MIGRATING) {
+            lockRequestedDuringMigration = true
+            return
+        }
         session.close()
         _stage.value = if (vault.isInitialized()) Stage.LOCKED else Stage.SETUP
     }
@@ -230,7 +249,14 @@ class VaultViewModel @JvmOverloads constructor(
             )
             session.markMigrated()
         }
-        _stage.value = Stage.OPEN
+        // Honour a lock that arrived while this was running, instead of opening over it.
+        if (lockRequestedDuringMigration) {
+            lockRequestedDuringMigration = false
+            session.close()
+            _stage.value = if (vault.isInitialized()) Stage.LOCKED else Stage.SETUP
+        } else {
+            _stage.value = Stage.OPEN
+        }
     }
 
     companion object {

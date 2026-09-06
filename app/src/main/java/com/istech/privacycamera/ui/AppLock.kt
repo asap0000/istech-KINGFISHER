@@ -114,7 +114,12 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     // fresh on every recomposition, so capturing it directly freezes the value from the
     // first pass — which is how the app stopped re-locking when it went to the background
     // (measured on a device: sent to home while open, came back still open).
-    val openNow by rememberUpdatedState(stage == VaultViewModel.Stage.OPEN)
+    // MIGRATING counts as "holding the key" here. The migration runs with the vault open, so
+    // a background transition during it has to be honoured too — the view model defers the
+    // actual lock until the rewrite finishes.
+    val holdingKey by rememberUpdatedState(
+        stage == VaultViewModel.Stage.OPEN || stage == VaultViewModel.Stage.MIGRATING
+    )
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
@@ -126,12 +131,12 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 // while our own auth prompt is up, since that prompt also pauses us and we
                 // must not re-lock underneath an in-progress reveal/unlock.
                 Lifecycle.Event.ON_PAUSE ->
-                    if (openNow && !BiometricGate.isPrompting && !BackupGate.isRunning) {
+                    if (holdingKey && !BiometricGate.isPrompting && !BackupGate.isRunning) {
                         vaultModel.lock()
                     }
                 // Belt-and-suspenders for any path that stops without pausing first.
                 Lifecycle.Event.ON_STOP ->
-                    if (openNow && !BackupGate.isRunning) {
+                    if (holdingKey && !BackupGate.isRunning) {
                         vaultModel.lock()
                     }
                 else -> {}
