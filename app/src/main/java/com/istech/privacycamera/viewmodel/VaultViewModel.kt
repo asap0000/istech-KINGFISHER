@@ -20,6 +20,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.istech.privacycamera.PrivacyCameraApplication
 import com.istech.privacycamera.crypto.MasterKeyVault
+import com.istech.privacycamera.crypto.RecoveryCode
 import javax.crypto.Cipher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -62,6 +63,16 @@ class VaultViewModel @JvmOverloads constructor(
         /** A passphrase exists and has not been given yet. */
         LOCKED,
 
+        /**
+         * Opened with a recovery code, waiting for the passphrase to be replaced.
+         *
+         * A stage of its own rather than a flag on [OPEN], because the library must stay
+         * covered until the new passphrase exists: someone who arrived here got in without
+         * knowing the old one, and letting them browse first would make the replacement a
+         * step they can wander away from.
+         */
+        RECOVERING,
+
         /** Re-encrypting an older library into the new key. */
         MIGRATING,
 
@@ -88,7 +99,21 @@ class VaultViewModel @JvmOverloads constructor(
     private val _lastAttemptFailed = MutableStateFlow(false)
     val lastAttemptFailed: StateFlow<Boolean> = _lastAttemptFailed.asStateFlow()
 
+    /** Set when the last recovery code did not fit; cleared on the next try. */
+    private val _recoveryFailed = MutableStateFlow(false)
+    val recoveryFailed: StateFlow<Boolean> = _recoveryFailed.asStateFlow()
+
     val hasShortcut: Boolean get() = vault.hasBiometricShortcut()
+
+    /**
+     * Whether a recovery code is on somebody's paper, as a stream.
+     *
+     * A stream rather than a getter because two screens react to it and neither recomposes on
+     * its own: the lock screen offers the code as a way in, and the gallery nudges while there
+     * is none. Both have to notice the moment one is issued.
+     */
+    private val _hasRecoveryCode = MutableStateFlow(vault.hasRecoveryCode())
+    val hasRecoveryCode: StateFlow<Boolean> = _hasRecoveryCode.asStateFlow()
 
     /**
      * True while a key is being produced or the library is being rewritten.
@@ -212,6 +237,102 @@ class VaultViewModel @JvmOverloads constructor(
 
     fun dropShortcut() = vault.dropBiometricShortcut()
 
+    // ---- the recovery code ---------------------------------------------------------------
+
+    /**
+     * Opens the vault with a written-down [code]; the screen is told through [stage] and
+     * [recoveryFailed].
+     *
+     * Lands in [Stage.RECOVERING] rather than [Stage.OPEN]. Getting in is only half of it —
+     * whoever is here still cannot open the app tomorrow until the passphrase is replaced.
+     */
+    fun unlockWithRecoveryCode(code: CharArray) {
+        viewModelScope.launch {
+            val waitFor = vault.nextAttemptAllowedIn()
+            if (waitFor > 0) {
+                _lockedOutFor.value = waitFor
+                return@launch
+            }
+            // Same reason the passphrase path sets this: deriving the key takes long enough
+            // for the user to reach the home button, and a lock request that arrives in that
+            // window must not be dropped.
+            openingInProgress = true
+            val key = withContext(io) {
+                try {
+                    vault.unlockWithRecoveryCode(code)
+                } finally {
+                    code.fill(' ')
+                }
+            }
+            if (key == null) {
+                openingInProgress = false
+                lockRequestedWhileOpening = false
+                _recoveryFailed.value = true
+                _lockedOutFor.value = vault.nextAttemptAllowedIn()
+                return@launch
+            }
+            _recoveryFailed.value = false
+            _lockedOutFor.value = 0
+            session.open(key)
+            finishOpening(Stage.RECOVERING)
+        }
+    }
+
+    /**
+     * Replaces the passphrase after a recovery unlock, then opens the library.
+     *
+     * The old passphrase is not asked for, because not having it is how the user got here.
+     * The master key is the one already in hand, so nothing is re-encrypted.
+     *
+     * The used code is retired here and not a moment earlier. Between the unlock and this
+     * point, retiring it would leave someone holding a passphrase they cannot remember and a
+     * paper that no longer works — an app killed at the wrong second would cost them the
+     * library. Once a passphrase they *do* know is in place that risk is gone, and letting a
+     * used code go on working would mean anyone who once saw the paper still has a way in.
+     */
+    fun finishRecovery(next: CharArray, onDone: (Boolean) -> Unit = {}) {
+        val key = session.key()
+        if (key == null) {
+            next.fill(' ')
+            onDone(false)
+            return
+        }
+        openingInProgress = true
+        viewModelScope.launch {
+            withContext(io) {
+                try {
+                    vault.resetPassphrase(key, next)
+                    vault.dropRecoveryCode()
+                } finally {
+                    next.fill(' ')
+                }
+            }
+            _hasRecoveryCode.value = false
+            migrateThenOpen()
+            onDone(true)
+        }
+    }
+
+    /** A code to show the user. Nothing is stored until [storeRecoveryCode]. */
+    fun newRecoveryCode(): String = RecoveryCode.generate()
+
+    /**
+     * Wraps the master key under [code], so from now on that paper opens the library.
+     *
+     * Called only once the user has copied a group back. Storing on display would retire the
+     * previous code in exchange for one that nobody has written down.
+     */
+    fun storeRecoveryCode(code: String): Boolean {
+        val key = session.key() ?: return false
+        return try {
+            vault.storeRecoveryCode(key, code)
+            _hasRecoveryCode.value = true
+            true
+        } catch (e: Exception) {
+            false
+        }
+    }
+
     /** Changes the passphrase. The master key is untouched, so nothing gets re-encrypted. */
     fun changePassphrase(current: CharArray, next: CharArray): Boolean =
         try {
@@ -235,6 +356,7 @@ class VaultViewModel @JvmOverloads constructor(
                 session.close()
                 session.clearMigrationMark()
             }
+            _hasRecoveryCode.value = false
             _stage.value = Stage.SETUP
             onDone()
         }
@@ -282,14 +404,14 @@ class VaultViewModel @JvmOverloads constructor(
      * Ends the opening stretch: either open the library, or honour a lock that arrived while
      * it was in progress.
      */
-    private fun finishOpening() {
+    private fun finishOpening(then: Stage = Stage.OPEN) {
         openingInProgress = false
         if (lockRequestedWhileOpening) {
             lockRequestedWhileOpening = false
             session.close()
             _stage.value = if (vault.isInitialized()) Stage.LOCKED else Stage.SETUP
         } else {
-            _stage.value = Stage.OPEN
+            _stage.value = then
         }
     }
 

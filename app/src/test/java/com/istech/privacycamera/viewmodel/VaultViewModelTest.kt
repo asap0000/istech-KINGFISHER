@@ -226,6 +226,117 @@ class VaultViewModelTest {
     }
 
     @Test
+    fun `回復コードは控えを確かめるまで保存されない`() = runTest(dispatcher) {
+        // 表示しただけで保存すると、「あとで」を押した人は、前の紙を取り上げられたうえ
+        // 新しい紙を持っていない状態になる。生成と保存を分けてあるのはこのため。
+        val model = VaultViewModel(app, dispatcher)
+        model.setUp(pin)
+        advanceUntilIdle()
+
+        val code = model.newRecoveryCode()
+        assertThat(model.hasRecoveryCode.value).isFalse()
+
+        model.storeRecoveryCode(code)
+
+        assertThat(model.hasRecoveryCode.value).isTrue()
+        assertThat(app.vault.hasRecoveryCode()).isTrue()
+    }
+
+    @Test
+    fun `回復コードで開くと、まず暗証番号の決め直しに入る`() = runTest(dispatcher) {
+        // OPEN へ直行させない。開けただけでは、この人は明日また開けなくなる。
+        val first = VaultViewModel(app, dispatcher)
+        first.setUp(pin)
+        advanceUntilIdle()
+        val code = first.newRecoveryCode()
+        first.storeRecoveryCode(code)
+
+        val model = VaultViewModel(app, dispatcher)
+        model.unlockWithRecoveryCode(code.toCharArray())
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.RECOVERING)
+        assertThat(model.recoveryFailed.value).isFalse()
+    }
+
+    @Test
+    fun `違う回復コードでは開かず、間違いとして伝わる`() = runTest(dispatcher) {
+        val first = VaultViewModel(app, dispatcher)
+        first.setUp(pin)
+        advanceUntilIdle()
+        first.storeRecoveryCode(first.newRecoveryCode())
+
+        val model = VaultViewModel(app, dispatcher)
+        model.unlockWithRecoveryCode(model.newRecoveryCode().toCharArray())
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.LOCKED)
+        assertThat(model.recoveryFailed.value).isTrue()
+    }
+
+    @Test
+    fun `決め直しを終えると、使った紙は無効になり新しい暗証番号で開く`() = runTest(dispatcher) {
+        val first = VaultViewModel(app, dispatcher)
+        first.setUp(pin)
+        advanceUntilIdle()
+        val code = first.newRecoveryCode()
+        first.storeRecoveryCode(code)
+
+        val model = VaultViewModel(app, dispatcher)
+        model.unlockWithRecoveryCode(code.toCharArray())
+        advanceUntilIdle()
+        model.finishRecovery("abcdef".toCharArray())
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.OPEN)
+        // 使い捨て——ただし決め直しが済むまでは効いたままだった（途中で落ちても詰まない）。
+        assertThat(model.hasRecoveryCode.value).isFalse()
+        assertThat(app.vault.unlockWithRecoveryCode(code.toCharArray())).isNull()
+
+        val relaunched = VaultViewModel(app, dispatcher)
+        relaunched.unlock("abcdef".toCharArray())
+        advanceUntilIdle()
+        assertThat(relaunched.stage.value).isEqualTo(VaultViewModel.Stage.OPEN)
+    }
+
+    @Test
+    fun `回復コードの導出中に背景へ送られたら、開かずにロックのままにする`() = runTest(dispatcher) {
+        // kensa-31 と同じ形の穴が、入口を増やした分だけ増えていないことを固定する。
+        val first = VaultViewModel(app, dispatcher)
+        first.setUp(pin)
+        advanceUntilIdle()
+        val code = first.newRecoveryCode()
+        first.storeRecoveryCode(code)
+
+        val ioScheduler = TestCoroutineScheduler()
+        val model = VaultViewModel(app, StandardTestDispatcher(ioScheduler))
+        model.unlockWithRecoveryCode(code.toCharArray())
+        runCurrent() // 導出が IO 側へ渡ったところ。画面はまだ回復コードの入力
+
+        model.lock() // ここでホームボタン
+
+        ioScheduler.advanceUntilIdle()
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.LOCKED)
+        assertThat(app.vaultSession.isOpen).isFalse()
+    }
+
+    @Test
+    fun `作り直すと回復コードも消える`() = runTest(dispatcher) {
+        val model = VaultViewModel(app, dispatcher)
+        model.setUp(pin)
+        advanceUntilIdle()
+        model.storeRecoveryCode(model.newRecoveryCode())
+
+        model.resetEverything { }
+        advanceUntilIdle()
+
+        assertThat(model.hasRecoveryCode.value).isFalse()
+        assertThat(VaultViewModel(app, dispatcher).hasRecoveryCode.value).isFalse()
+    }
+
+    @Test
     fun `作り直すと写真も鍵も消えて設定に戻る`() = runTest(dispatcher) {
         val model = VaultViewModel(app, dispatcher)
         model.setUp(pin)

@@ -60,15 +60,17 @@ class VaultScreensScreenshotTest {
     }
 
     @Test
-    fun `ロック画面は指紋と暗証番号を両方出す`() {
+    fun `ロック画面は指紋と暗証番号と回復コードを出す`() {
         compose.setContent {
             PrivacyCameraTheme {
                 VaultUnlockScreen(
                     showShortcut = true,
+                    showRecovery = true,
                     lastAttemptFailed = false,
                     lockedOutFor = 0,
                     onSubmit = {},
                     onUseShortcut = {},
+                    onUseRecovery = {},
                     onForgot = {}
                 )
             }
@@ -83,10 +85,12 @@ class VaultScreensScreenshotTest {
             PrivacyCameraTheme {
                 VaultUnlockScreen(
                     showShortcut = false,
+                    showRecovery = false,
                     lastAttemptFailed = true,
                     lockedOutFor = 4_000,
                     onSubmit = {},
                     onUseShortcut = {},
+                    onUseRecovery = {},
                     onForgot = {}
                 )
             }
@@ -109,11 +113,66 @@ class VaultScreensScreenshotTest {
     fun `忘れたときは消えることを正面から言う`() {
         compose.setContent {
             PrivacyCameraTheme {
-                ForgotPassphraseDialog(onConfirm = {}, onDismiss = {})
+                ForgotPassphraseDialog(hasRecoveryCode = false, onConfirm = {}, onDismiss = {})
             }
         }
         // ダイアログは別ウィンドウなので root が2つになる。後ろ側がダイアログ本体。
         compose.onAllNodes(isRoot()).onLast()
             .captureRoboImage("${Screenshots.DIR}/vault_forgot.png")
+    }
+
+    @Test
+    fun `回復コードがあるなら、消す前にそちらへ差し向ける`() {
+        // 同じダイアログが正反対のことを言う。紙が手元にある人に「消すしかない」と
+        // 言ってしまうのが、この機能を足して唯一増えた事故の形。
+        compose.setContent {
+            PrivacyCameraTheme {
+                ForgotPassphraseDialog(hasRecoveryCode = true, onConfirm = {}, onDismiss = {})
+            }
+        }
+        compose.onAllNodes(isRoot()).onLast()
+            .captureRoboImage("${Screenshots.DIR}/vault_forgot_with_recovery.png")
+    }
+
+    @Test
+    fun `回復コードは区切って大きく出し、控えを促す`() {
+        // 紙に書き写す前提の画面。文字が詰まったり区切りが消えたりしても機能は動くので、
+        // 見た目のほうを機械で止める。
+        compose.setContent {
+            PrivacyCameraTheme {
+                RecoveryCodeIssueScreen(
+                    code = "K7M2P9XR4TQW3BND",
+                    canSkip = true,
+                    onConfirmed = {},
+                    onSkip = {}
+                )
+            }
+        }
+        compose.onRoot().captureRoboImage("${Screenshots.DIR}/recovery_issue.png")
+    }
+
+    @Test
+    fun `回復コードの入力は区切りを気にしなくてよいと言う`() {
+        compose.setContent {
+            PrivacyCameraTheme {
+                RecoveryUnlockScreen(
+                    lastAttemptFailed = false,
+                    lockedOutFor = 0,
+                    onSubmit = {},
+                    onCancel = {}
+                )
+            }
+        }
+        compose.onRoot().captureRoboImage("${Screenshots.DIR}/recovery_unlock.png")
+    }
+
+    @Test
+    fun `回復のあとは暗証番号の決め直しを求める`() {
+        compose.setContent {
+            PrivacyCameraTheme {
+                RecoveryNewPassphraseScreen(onSubmit = {})
+            }
+        }
+        compose.onRoot().captureRoboImage("${Screenshots.DIR}/recovery_new_passphrase.png")
     }
 }

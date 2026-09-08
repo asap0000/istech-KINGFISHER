@@ -32,6 +32,7 @@ import com.istech.privacycamera.ui.CameraScreen
 import com.istech.privacycamera.ui.EditScreen
 import com.istech.privacycamera.ui.GalleryScreen
 import com.istech.privacycamera.ui.MaskEditScreen
+import com.istech.privacycamera.ui.SecurityScreen
 import com.istech.privacycamera.ui.SettingsScreen
 import com.istech.privacycamera.ui.SubmissionOutputFlow
 import com.istech.privacycamera.ui.TrashScreen
@@ -71,6 +72,7 @@ private object Routes {
     const val LOG = "log"
     const val TRASH = "trash"
     const val SETTINGS = "settings"
+    const val SECURITY = "security"
     const val OUTPUT = "output/{id}"
     fun viewer(id: String) = "viewer/$id"
     fun edit(id: String) = "edit/$id"
@@ -98,6 +100,7 @@ private fun AppNavHost() {
                 onOpenLog = { navController.navigate(Routes.LOG) },
                 onOpenTrash = { navController.navigate(Routes.TRASH) },
                 onOpenSettings = { navController.navigate(Routes.SETTINGS) },
+                onOpenSecurity = { navController.navigate(Routes.SECURITY) },
                 viewModel = viewModel
             )
         }
@@ -106,6 +109,9 @@ private fun AppNavHost() {
                 onBack = { navController.popBackStack() },
                 viewModel = viewModel
             )
+        }
+        composable(Routes.SECURITY) {
+            SecurityScreen(onBack = { navController.popBackStack() })
         }
         composable(Routes.TRASH) {
             TrashScreen(

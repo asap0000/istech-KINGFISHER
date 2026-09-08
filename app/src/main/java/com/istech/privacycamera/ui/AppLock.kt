@@ -71,18 +71,40 @@ private const val AUTO_LOCK_MS = 120_000L
  */
 @Composable
 fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
-    val vaultModel: VaultViewModel = viewModel()
+    // The activity's model, not a nearest-owner one. This call site happens to sit outside the
+    // NavHost and would resolve correctly either way, but it goes through the same helper as
+    // every other screen so there is one rule rather than one rule and an exception.
+    val vaultModel = rememberVaultViewModel()
     val stage by vaultModel.stage.collectAsState()
     val migration by vaultModel.migration.collectAsState()
     val attemptFailed by vaultModel.lastAttemptFailed.collectAsState()
+    val recoveryFailed by vaultModel.recoveryFailed.collectAsState()
     val lockedOutFor by vaultModel.lockedOutFor.collectAsState()
+    val hasRecoveryCode by vaultModel.hasRecoveryCode.collectAsState()
     var showReset by remember { mutableStateOf(false) }
+    // The recovery-code field, reached from the lock screen. Local rather than a stage,
+    // because nothing has happened yet — it is still the same locked vault, seen from the
+    // other door, and backing out must cost nothing.
+    var enteringRecoveryCode by remember { mutableStateOf(false) }
+    // A code generated but not yet stored, and whether "あとで" is on offer. Held here until
+    // the user has copied a group back: an unconfirmed code is characters on a screen, and
+    // storing it early would retire the paper the user still has.
+    var pendingCode by remember { mutableStateOf<String?>(null) }
+    var pendingCodeSkippable by remember { mutableStateOf(true) }
     var lastInteraction by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
 
     val lockState = when (stage) {
         VaultViewModel.Stage.OPEN -> LockState.UNLOCKED
         VaultViewModel.Stage.MIGRATING -> LockState.AUTHENTICATING
         else -> LockState.LOCKED
+    }
+
+    // Anything that takes the vault out of OPEN — the app going to the background, an
+    // auto-lock — clears a code that has not been stored yet. Leaving it on screen would draw
+    // the one secret this app never shows twice over a lock screen the user just triggered.
+    LaunchedEffect(stage) {
+        if (stage != VaultViewModel.Stage.OPEN) pendingCode = null
+        if (stage != VaultViewModel.Stage.LOCKED) enteringRecoveryCode = false
     }
 
     /**
@@ -193,18 +215,49 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 hasExistingLibrary = vaultModel.libraryNeedsMigration(),
                 onSubmit = { pass ->
                     vaultModel.setUp(pass) { ok ->
-                        if (ok) enrollShortcutIfPossible(activity, vaultModel)
+                        // The recovery code comes after the fingerprint prompt, not beside
+                        // it: BiometricPrompt is its own window, and a code drawn underneath
+                        // it would be read by nobody and then never shown again.
+                        if (ok) {
+                            enrollShortcutIfPossible(activity, vaultModel) {
+                                pendingCode = vaultModel.newRecoveryCode()
+                                pendingCodeSkippable = true
+                            }
+                        }
                     }
                 }
             )
 
-            VaultViewModel.Stage.LOCKED -> VaultUnlockScreen(
-                showShortcut = vaultModel.hasShortcut,
-                lastAttemptFailed = attemptFailed,
-                lockedOutFor = lockedOutFor,
-                onSubmit = { vaultModel.unlock(it) },
-                onUseShortcut = { useShortcut() },
-                onForgot = { showReset = true }
+            VaultViewModel.Stage.LOCKED ->
+                if (enteringRecoveryCode) {
+                    RecoveryUnlockScreen(
+                        lastAttemptFailed = recoveryFailed,
+                        lockedOutFor = lockedOutFor,
+                        onSubmit = { vaultModel.unlockWithRecoveryCode(it) },
+                        onCancel = { enteringRecoveryCode = false }
+                    )
+                } else {
+                    VaultUnlockScreen(
+                        showShortcut = vaultModel.hasShortcut,
+                        showRecovery = hasRecoveryCode,
+                        lastAttemptFailed = attemptFailed,
+                        lockedOutFor = lockedOutFor,
+                        onSubmit = { vaultModel.unlock(it) },
+                        onUseShortcut = { useShortcut() },
+                        onUseRecovery = { enteringRecoveryCode = true },
+                        onForgot = { showReset = true }
+                    )
+                }
+
+            VaultViewModel.Stage.RECOVERING -> RecoveryNewPassphraseScreen(
+                onSubmit = { next ->
+                    vaultModel.finishRecovery(next) { ok ->
+                        if (ok) {
+                            pendingCode = vaultModel.newRecoveryCode()
+                            pendingCodeSkippable = true
+                        }
+                    }
+                }
             )
 
             VaultViewModel.Stage.MIGRATING ->
@@ -213,8 +266,23 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
             VaultViewModel.Stage.OPEN -> Unit
         }
 
+        // Drawn over everything, including the gallery: this is the one screen whose content
+        // cannot be shown a second time, so it must not sit behind anything.
+        pendingCode?.let { code ->
+            RecoveryCodeIssueScreen(
+                code = code,
+                canSkip = pendingCodeSkippable,
+                onConfirmed = {
+                    vaultModel.storeRecoveryCode(code)
+                    pendingCode = null
+                },
+                onSkip = { pendingCode = null }
+            )
+        }
+
         if (showReset) {
             ForgotPassphraseDialog(
+                hasRecoveryCode = hasRecoveryCode,
                 onConfirm = {
                     showReset = false
                     vaultModel.resetEverything { }
@@ -231,9 +299,25 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
  *
  * Silently skipped where the device has nothing to authenticate against. That is not a
  * failure: the passphrase carries the whole job there, which is the case this design is for.
+ * Measured on an AVD with a device PIN but no enrolled fingerprint (2026-09-07): the keystore
+ * refuses the key outright — `hasEnrollments: false cannot participate in Keystore
+ * operations` — so no shortcut is created. That is why the recovery code, and not the
+ * fingerprint, is what a forgotten passphrase is rescued with.
+ *
+ * @param onFinished run once there is nothing more to prompt for, whether a shortcut was
+ *   enrolled, refused, or never possible. Always called, because the step after this one —
+ *   handing over the recovery code — must not be reachable only on the happy path.
  */
-private fun enrollShortcutIfPossible(activity: FragmentActivity, model: VaultViewModel) {
-    val cipher = model.enrollCipher() ?: return
+private fun enrollShortcutIfPossible(
+    activity: FragmentActivity,
+    model: VaultViewModel,
+    onFinished: () -> Unit
+) {
+    val cipher = model.enrollCipher()
+    if (cipher == null) {
+        onFinished()
+        return
+    }
     BiometricGate.authenticate(
         activity,
         cipher,
@@ -242,6 +326,7 @@ private fun enrollShortcutIfPossible(activity: FragmentActivity, model: VaultVie
         if (result is BiometricGate.Result.Success && authenticated != null) {
             model.completeEnrollment(authenticated)
         }
+        onFinished()
     }
 }
 

@@ -132,10 +132,10 @@ fun SettingsScreen(
                 }
             }
 
-            HorizontalDivider()
-
-            VaultSettingsSection(activity = activity, vaultModel = viewModel())
-
+            // The passphrase, fingerprint and recovery-code controls used to sit here. They
+            // moved to [SecurityScreen], which the drawer reaches without a gesture: the
+            // seven-tap reveal belongs to submission printing — a trade feature nobody is
+            // hurt by not finding — while a safety net nobody can find is not one.
             HorizontalDivider()
 
             TextButton(

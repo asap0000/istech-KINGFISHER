@@ -64,6 +64,7 @@ import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -118,6 +119,7 @@ fun GalleryScreen(
     onOpenLog: () -> Unit,
     onOpenTrash: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenSecurity: () -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
     val photos by viewModel.photos.collectAsState()
@@ -126,6 +128,10 @@ fun GalleryScreen(
     val importedCount by viewModel.importedMigrationCount.collectAsState()
     // Hidden submission-print settings (Pro-only; docs/2026-07-04_仕様_提出用出力機能.md §4).
     val settingsRevealed by viewModel.settingsRevealed.collectAsState()
+    // The vault's own view model, for the recovery-code nudge below. Taken from the activity
+    // (see [rememberVaultViewModel]) — a plain viewModel() here would be scoped to this
+    // destination and would never see a code issued on another screen.
+    val hasRecoveryCode by rememberVaultViewModel().hasRecoveryCode.collectAsState()
     val trash by viewModel.trash.collectAsState()
     val drawerState = rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
@@ -324,6 +330,17 @@ fun GalleryScreen(
                     )
                 }
 
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                NavigationDrawerItem(
+                    label = { Text("暗証番号と回復コード") },
+                    selected = false,
+                    onClick = {
+                        scope.launch { drawerState.close() }
+                        onOpenSecurity()
+                    },
+                    modifier = Modifier.padding(horizontal = 12.dp)
+                )
+
                 // Hidden entry to the submission-print settings (Pro-only, dev-options-style):
                 // invisible until revealed via the version-label tap gesture below.
                 if (Tier.isPro && settingsRevealed) {
@@ -400,6 +417,34 @@ fun GalleryScreen(
             }
         ) { padding ->
             Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            // The nudge for a recovery code that was postponed at setup. A strip that is
+            // dismissed by acting on it, not a dialog: "later" exists on the setup screen so
+            // that nobody is stopped at first run without pen and paper to hand, and a modal
+            // here would take that back. It stays until a code exists, because the day it
+            // stops being possible to issue one is the day it turns out to have been needed.
+            if (!hasRecoveryCode && photos.isNotEmpty()) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .clickable { onOpenSecurity() }
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "回復コードがまだありません",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                        Text(
+                            "暗証番号を忘れると、写真を開く手立てがありません。" +
+                                "ここを押して発行してください。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
             // No point offering a search box before there is anything to search.
             if (photos.isNotEmpty()) {
             OutlinedTextField(

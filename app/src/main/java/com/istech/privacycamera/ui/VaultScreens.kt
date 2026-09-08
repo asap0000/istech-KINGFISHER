@@ -44,6 +44,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
@@ -74,7 +75,7 @@ internal fun VaultSetupScreen(
             "写真を開くための暗証番号です。" +
                 "指紋が使える端末では普段は指紋で開けますが、" +
                 "指紋が使えなくなったときはこの暗証番号で開きます。\n\n" +
-                "忘れると写真を開けません。控えを取れる場所に残してください。",
+                "忘れると写真を開けません。このあと、忘れたとき用の回復コードを発行します。",
             style = MaterialTheme.typography.bodyMedium,
             textAlign = TextAlign.Center
         )
@@ -136,11 +137,14 @@ internal fun VaultSetupScreen(
 @Composable
 internal fun VaultUnlockScreen(
     showShortcut: Boolean,
+    /** True when a recovery code has been issued, so there is a second door to offer. */
+    showRecovery: Boolean,
     lastAttemptFailed: Boolean,
     /** Milliseconds the user must wait before trying again; 0 when they may go ahead. */
     lockedOutFor: Long,
     onSubmit: (CharArray) -> Unit,
     onUseShortcut: () -> Unit,
+    onUseRecovery: () -> Unit,
     onForgot: () -> Unit
 ) {
     var pass by remember { mutableStateOf("") }
@@ -186,6 +190,11 @@ internal fun VaultUnlockScreen(
             onClick = { onSubmit(pass.toCharArray()); pass = "" }
         ) { Text("開く") }
         Spacer(Modifier.height(12.dp))
+        // Offered only where a code exists. Naming a way in that was never issued would send
+        // someone hunting for a piece of paper they never had, at the worst possible moment.
+        if (showRecovery) {
+            TextButton(onClick = onUseRecovery) { Text("回復コードで開く") }
+        }
         TextButton(onClick = onForgot) { Text("暗証番号を忘れた") }
     }
 }
@@ -219,9 +228,28 @@ internal fun VaultMigrationScreen(done: Int, total: Int) {
     }
 }
 
-/** The shared frame: icon, title, then whatever the particular step needs. */
+/**
+ * The shared frame: icon, title, then whatever the particular step needs.
+ *
+ * Opaque **and deaf**. Every screen wearing this frame is drawn over something that is still
+ * composed underneath — the gallery behind the lock, the settings list behind a recovery code
+ * — and a full-screen background only hides that; it does not stop a finger reaching it. Two
+ * screens are hit-tested top-down, and a tap landing where this frame has no child of its own
+ * falls straight through to whatever is below.
+ *
+ * Measured on the OPPO (2026-09-08), on `v0.6.1-beta`'s own lock screen: locked, the gallery
+ * still underneath, one tap on blank space at the top of the lock screen opened the photo
+ * viewer behind it — and with it "削除", which needs no key to do damage.
+ *
+ * The swallow lives here, on the frame, rather than on each screen that happens to overlay
+ * something. Every screen in this sequence has the same requirement, and the older
+ * [LockScreen] had exactly this code before the two-layer key replaced it — the guard was
+ * dropped in the move, and adding it back per-screen would be waiting to drop it again.
+ */
+// internal (not private) so the recovery screens in RecoveryScreens.kt wear the same frame —
+// they are steps in the same sequence and should not look like a different app.
 @Composable
-private fun VaultFrame(
+internal fun VaultFrame(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     title: String,
     content: @Composable () -> Unit
@@ -230,6 +258,15 @@ private fun VaultFrame(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            // Children still get every event first (they are hit-tested before this Column);
+            // what this stops is the leftover travelling on to the screen behind.
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    while (true) {
+                        awaitPointerEvent().changes.forEach { it.consume() }
+                    }
+                }
+            }
             .padding(32.dp),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
@@ -250,20 +287,35 @@ private fun VaultFrame(
 /**
  * Confirms wiping the library after a forgotten passphrase.
  *
- * Says what is lost rather than softening it. There is nothing to recover with — no copy of
- * the passphrase exists anywhere, by design — so the choice really is between a library that
- * can never be opened and one that is gone.
+ * Says what is lost rather than softening it. The passphrase is stored nowhere, by design, so
+ * once the recovery code is gone too, the choice really is between a library that can never be
+ * opened and one that is gone.
+ *
+ * @param hasRecoveryCode whether a code was issued. When one was, this dialog's job changes:
+ *   the destructive option is no longer the only one left, and pointing back at the paper
+ *   first is what keeps someone from erasing a library they could still have opened.
  */
 @Composable
-internal fun ForgotPassphraseDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+internal fun ForgotPassphraseDialog(
+    hasRecoveryCode: Boolean,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
     androidx.compose.material3.AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("暗証番号を忘れたとき") },
         text = {
             Text(
-                "暗証番号はこの端末にもどこにも保存されていないため、思い出す以外に開く方法はありません。\n\n" +
-                    "書き出したバックアップが手元にあれば、作り直したあとでそこから戻せます。\n\n" +
-                    "作り直すと、いまこの端末にある写真はすべて消えます。この操作は取り消せません。"
+                if (hasRecoveryCode) {
+                    "回復コードを発行しています。手元の紙にある16文字で開けます——" +
+                        "前の画面の「回復コードで開く」をお試しください。\n\n" +
+                        "紙も見つからない場合は作り直すほかありません。" +
+                        "作り直すと、いまこの端末にある写真はすべて消えます。この操作は取り消せません。"
+                } else {
+                    "暗証番号はこの端末にもどこにも保存されていないため、思い出す以外に開く方法はありません。\n\n" +
+                        "書き出したバックアップが手元にあれば、作り直したあとでそこから戻せます。\n\n" +
+                        "作り直すと、いまこの端末にある写真はすべて消えます。この操作は取り消せません。"
+                }
             )
         },
         confirmButton = {
