@@ -98,6 +98,20 @@ class KensaColdStartSmokeTest {
                 )
             ) { "PIN setup did not finish" }
 
+            // Since v0.7.0 a recovery code is offered as soon as the PIN is set, drawn over
+            // the app. Decline it — the code has its own tests, and this one is about the
+            // screens behind it. Dismissed by its own button, not by back: the screen is an
+            // overlay rather than a navigation destination, so back would leave the app.
+            //
+            // This runs before the biometric check below, because that check asks whether the
+            // camera screen is present and the recovery screen is drawn on top of exactly
+            // that. It is also how this test first failed (kensa, 2026-09-08): a covered
+            // screen used to stay in the accessibility tree, so `保護フォルダを開く` was
+            // "found" straight through the overlay, the check passed, and every later click
+            // landed on the overlay and was swallowed.
+            device.wait(Until.findObject(By.textStartsWith("あとで")), SHORT_WAIT)?.click()
+            device.waitForIdle()
+
             // A configured biometric device may offer enrollment. Dismissing it leaves the
             // passphrase path enabled and keeps this smoke test device-independent.
             if (!device.wait(Until.hasObject(By.desc("保護フォルダを開く")), SHORT_WAIT)) {

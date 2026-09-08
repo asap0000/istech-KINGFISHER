@@ -48,6 +48,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.fragment.app.FragmentActivity
@@ -192,8 +193,9 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     // import/export), so their results would be dropped on return. Keeping it
     // composed — and merely covered — lets those flows complete after unlocking.
     androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
-        // Observe every touch (Initial pass, without consuming) to reset the timer.
-        androidx.compose.foundation.layout.Box(
+        SealedWhileCovered(
+            covered = stage != VaultViewModel.Stage.OPEN || pendingCode != null,
+            // Observe every touch (Initial pass, without consuming) to reset the timer.
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(Unit) {
@@ -290,6 +292,40 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 onDismiss = { showReset = false }
             )
         }
+    }
+}
+
+/**
+ * The app's own screens, kept composed but sealed off while a vault screen covers them.
+ *
+ * Covering is three separate things, and the app had only been doing two of them. An opaque
+ * background stops the content being *seen*; swallowing touches ([VaultFrame]) stops it being
+ * *pressed*; this stops it being *read*. `FLAG_SECURE` blocks screenshots and the recents
+ * thumbnail, but it does nothing to the accessibility tree, which any enabled accessibility
+ * service can walk.
+ *
+ * Measured on the OPPO with `v0.7.0-beta` (2026-09-08): with the vault locked over the
+ * gallery, the tree still carried a photo's own memo and its category — the exact strings this
+ * product exists to keep to itself. `uiautomator dump` reads that same tree, which is also why
+ * the inspection seat's smoke test could "find" a button that no finger could reach.
+ *
+ * [clearAndSetSemantics] with an empty block drops the whole subtree, so nothing underneath is
+ * announced, focusable, or findable until the cover comes off. The content stays composed
+ * either way — tearing it out would unregister in-flight Activity-result launchers (the system
+ * file picker used by import/export), and their results would be dropped on return.
+ */
+@Composable
+internal fun SealedWhileCovered(
+    covered: Boolean,
+    modifier: Modifier = Modifier,
+    content: @Composable () -> Unit
+) {
+    androidx.compose.foundation.layout.Box(
+        modifier = modifier.then(
+            if (covered) Modifier.clearAndSetSemantics {} else Modifier
+        )
+    ) {
+        content()
     }
 }
 

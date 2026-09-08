@@ -40,6 +40,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.istech.privacycamera.viewmodel.VaultViewModel
@@ -73,6 +74,9 @@ fun SecurityScreen(onBack: () -> Unit) {
     }
 
     Scaffold(
+        // Sealed the same way the lock gate seals the app behind it: while the code is on
+        // screen, the list underneath must not be readable by an accessibility service either.
+        modifier = if (pendingCode != null) Modifier.clearAndSetSemantics {} else Modifier,
         topBar = {
             TopAppBar(
                 title = { Text("暗証番号と回復コード") },
