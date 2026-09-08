@@ -26,11 +26,19 @@ import org.json.JSONObject
 /**
  * Holds the key that decrypts the photos, wrapped two ways.
  *
- * The passphrase is the credential; a fingerprint is a shortcut past typing it. Both
- * wrappings hold the *same* master key, so either one opens the library:
+ * The passphrase is the credential; a fingerprint is a shortcut past typing it; a recovery
+ * code is the copy handed over in advance for the day the passphrase is gone. All three
+ * wrappings hold the *same* master key, so any one of them opens the library:
  *
- *   master.pin  — wrapped with a key derived from the user's passphrase (PBKDF2)
- *   master.bio  — wrapped with an AndroidKeyStore key that requires authentication
+ *   master.pin       — wrapped with a key derived from the user's passphrase (PBKDF2)
+ *   master.bio       — wrapped with an AndroidKeyStore key that requires authentication
+ *   master.recovery  — wrapped with a key derived from a written-down code (PBKDF2)
+ *
+ * Adding a wrapping costs nothing already stored: the photos are encrypted with the master
+ * key, not with the passphrase, so a new way in is a new envelope around the same key and no
+ * photo is rewritten. That is the whole reason a rescue was possible to add at all — had the
+ * photos been encrypted under the passphrase directly, forgetting it would have been the end
+ * of them.
  *
  * Two wrappings rather than one because each fails in a way the other survives. Binding the
  * master key straight to authentication (`setUserAuthenticationRequired` on the key that
@@ -58,6 +66,7 @@ class MasterKeyVault(
 
     private val pinFile = File(dir, "master.pin")
     private val bioFile = File(dir, "master.bio")
+    private val recoveryFile = File(dir, "master.recovery")
     private val attemptsFile = File(dir, "pin_attempts.json")
 
     init {
@@ -69,6 +78,9 @@ class MasterKeyVault(
 
     /** True when a fingerprint shortcut has been enrolled for this vault. */
     fun hasBiometricShortcut(): Boolean = bioFile.exists()
+
+    /** True when a recovery code has been issued and is still good for one use. */
+    fun hasRecoveryCode(): Boolean = recoveryFile.exists()
 
     /**
      * Creates a fresh master key and wraps it with [passphrase]. Fails if one already exists,
@@ -88,24 +100,8 @@ class MasterKeyVault(
      * one clears the count. The delay is enforced by [nextAttemptAllowedIn], which the
      * caller checks before offering the field — this method does not sleep.
      */
-    fun unlockWithPassphrase(passphrase: CharArray): SecretKey? {
-        val blob = pinFile.takeIf { it.exists() }?.readBytes() ?: return null
-        val master = try {
-            val salt = blob.copyOfRange(0, SALT_BYTES)
-            val iv = blob.copyOfRange(SALT_BYTES, SALT_BYTES + IV_BYTES)
-            val body = blob.copyOfRange(SALT_BYTES + IV_BYTES, blob.size)
-            val kek = BackupCrypto.deriveKey(BackupCrypto.normalizeWidth(passphrase), salt)
-            Cipher.getInstance(TRANSFORMATION).run {
-                init(Cipher.DECRYPT_MODE, kek, GCMParameterSpec(TAG_BITS, iv))
-                doFinal(body)
-            }
-        } catch (e: Exception) {
-            recordFailedAttempt()
-            return null
-        }
-        clearAttempts()
-        return SecretKeySpec(master, "AES")
-    }
+    fun unlockWithPassphrase(passphrase: CharArray): SecretKey? =
+        openWrapping(pinFile, BackupCrypto.normalizeWidth(passphrase))
 
     /**
      * Replaces the passphrase, keeping the same master key so nothing needs re-encrypting.
@@ -118,6 +114,18 @@ class MasterKeyVault(
     }
 
     /**
+     * Re-wraps [master] under [next] without asking for the old passphrase.
+     *
+     * For the one caller that has the master key in hand but no passphrase to offer: someone
+     * who got in with their recovery code, precisely because they cannot produce the old one.
+     * Not reachable from the locked state — the key has to come from somewhere first.
+     */
+    fun resetPassphrase(master: SecretKey, next: CharArray) {
+        writePinWrapping(master.encoded, next)
+        clearAttempts()
+    }
+
+    /**
      * Wipes both wrappings, so the master key — and with it every photo — is gone for good.
      *
      * Offered because the alternative for someone who has forgotten their passphrase is a
@@ -127,8 +135,43 @@ class MasterKeyVault(
     fun reset() {
         pinFile.delete()
         bioFile.delete()
+        recoveryFile.delete()
         attemptsFile.delete()
         biometric.deleteKey()
+    }
+
+    // ---- the recovery code -------------------------------------------------------------
+
+    /**
+     * Stores [master] wrapped under [code], replacing any code issued before.
+     *
+     * Writing is what makes a code real: [RecoveryCode.generate] only produces characters, and
+     * the caller shows them and has the user copy one group back *before* getting here. A code
+     * that had been stored while the user was still deciding whether to write it down would be
+     * the worst of both — the old code retired, the new one on nobody's paper.
+     */
+    fun storeRecoveryCode(master: SecretKey, code: String) {
+        writeWrapping(recoveryFile, master.encoded, code.toCharArray())
+    }
+
+    /**
+     * Opens the vault with [code], or returns null if it does not fit. Wrong tries count
+     * against the same delay the passphrase field uses — a code is 80 bits, but there is no
+     * reason to let someone work through guesses faster here than there.
+     *
+     * **The code is not retired on use.** It stops working when a replacement is stored, which
+     * happens after the new passphrase is set. Retiring it the moment it opened would leave a
+     * gap — app killed, or user distracted, between the unlock and the new passphrase — in
+     * which the old passphrase is still the forgotten one and the paper no longer works. That
+     * gap is a locked-out library, which is the exact outcome this whole feature exists to
+     * prevent.
+     */
+    fun unlockWithRecoveryCode(code: CharArray): SecretKey? =
+        openWrapping(recoveryFile, RecoveryCode.normalize(code))
+
+    /** Throws the recovery code away, leaving the passphrase wrapping untouched. */
+    fun dropRecoveryCode() {
+        recoveryFile.delete()
     }
 
     // ---- the fingerprint shortcut -------------------------------------------------------
@@ -212,18 +255,56 @@ class MasterKeyVault(
         }
 
     private fun writePinWrapping(master: ByteArray, passphrase: CharArray) {
+        writeWrapping(pinFile, master, BackupCrypto.normalizeWidth(passphrase))
+    }
+
+    /**
+     * Wraps [master] under a key derived from [secret] and writes it to [target].
+     *
+     * [secret] is already normalized by the caller — each kind of secret is folded its own way
+     * (width for a passphrase, width and case and separators for a recovery code), and doing
+     * it here would mean this function had to know which kind it was handed.
+     */
+    private fun writeWrapping(target: File, master: ByteArray, secret: CharArray) {
         val salt = ByteArray(SALT_BYTES).also { SecureRandom().nextBytes(it) }
-        val kek = BackupCrypto.deriveKey(BackupCrypto.normalizeWidth(passphrase), salt)
+        val kek = BackupCrypto.deriveKey(secret, salt)
         val cipher = Cipher.getInstance(TRANSFORMATION).apply { init(Cipher.ENCRYPT_MODE, kek) }
         val body = cipher.doFinal(master)
         // Written whole, then moved into place: a half-written wrapping is an unopenable
         // library, and the export bug this project already paid for was exactly that shape.
-        val tmp = File(dir, "master.pin.tmp")
+        val tmp = File(dir, target.name + ".tmp")
         tmp.writeBytes(salt + cipher.iv + body)
-        if (!tmp.renameTo(pinFile)) {
-            pinFile.writeBytes(tmp.readBytes())
+        if (!tmp.renameTo(target)) {
+            target.writeBytes(tmp.readBytes())
             tmp.delete()
         }
+    }
+
+    /**
+     * Unwraps the master key in [file] with [secret], or null when it does not fit or the
+     * wrapping is not there.
+     *
+     * A wrong try is counted and a right one clears the count, whichever wrapping was tried:
+     * the delay is about how fast someone may keep guessing at this vault, not about which
+     * field they are guessing into.
+     */
+    private fun openWrapping(file: File, secret: CharArray): SecretKey? {
+        val blob = file.takeIf { it.exists() }?.readBytes() ?: return null
+        val master = try {
+            val salt = blob.copyOfRange(0, SALT_BYTES)
+            val iv = blob.copyOfRange(SALT_BYTES, SALT_BYTES + IV_BYTES)
+            val body = blob.copyOfRange(SALT_BYTES + IV_BYTES, blob.size)
+            val kek = BackupCrypto.deriveKey(secret, salt)
+            Cipher.getInstance(TRANSFORMATION).run {
+                init(Cipher.DECRYPT_MODE, kek, GCMParameterSpec(TAG_BITS, iv))
+                doFinal(body)
+            }
+        } catch (e: Exception) {
+            recordFailedAttempt()
+            return null
+        }
+        clearAttempts()
+        return SecretKeySpec(master, "AES")
     }
 
     companion object {

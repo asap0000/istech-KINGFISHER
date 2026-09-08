@@ -142,6 +142,107 @@ class MasterKeyVaultTest {
     }
 
     @Test
+    fun `回復コードは同じ鍵を返す`() {
+        // 三つ目の包み。写真の暗号化には触れないので、足しても既存の写真は書き直されない。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        val code = RecoveryCode.generate()
+
+        vault.storeRecoveryCode(master, code)
+
+        assertThat(vault.hasRecoveryCode()).isTrue()
+        val viaCode = newVault().unlockWithRecoveryCode(code.toCharArray())
+        assertThat(viaCode!!.encoded).isEqualTo(master.encoded)
+    }
+
+    @Test
+    fun `区切りつきで打ち込んでも開く`() {
+        // 画面には4桁区切りで出るので、紙からはそのまま写される。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        val code = RecoveryCode.generate()
+        vault.storeRecoveryCode(master, code)
+
+        val typed = RecoveryCode.format(code).lowercase().toCharArray()
+        assertThat(newVault().unlockWithRecoveryCode(typed)!!.encoded).isEqualTo(master.encoded)
+    }
+
+    @Test
+    fun `違う回復コードでは開かない`() {
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        vault.storeRecoveryCode(master, RecoveryCode.generate())
+
+        assertThat(newVault().unlockWithRecoveryCode(RecoveryCode.generate().toCharArray()))
+            .isNull()
+    }
+
+    @Test
+    fun `回復コードが無ければ開きようがない`() {
+        newVault().initialize(pin)
+        assertThat(newVault().hasRecoveryCode()).isFalse()
+        assertThat(newVault().unlockWithRecoveryCode(RecoveryCode.generate().toCharArray()))
+            .isNull()
+    }
+
+    @Test
+    fun `再発行すると前のコードは使えなくなる`() {
+        // 使い捨ての実体はここ。古い紙を見た人がいつまでも開けるのを止める。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        val old = RecoveryCode.generate()
+        vault.storeRecoveryCode(master, old)
+
+        val fresh = RecoveryCode.generate()
+        vault.storeRecoveryCode(master, fresh)
+
+        assertThat(newVault().unlockWithRecoveryCode(old.toCharArray())).isNull()
+        assertThat(newVault().unlockWithRecoveryCode(fresh.toCharArray())!!.encoded)
+            .isEqualTo(master.encoded)
+    }
+
+    @Test
+    fun `回復コードで開いたあと、今の暗証番号なしで差し替えられる`() {
+        // 忘れたから来ている以上、古い暗証番号は出せない。鍵は手の中にあるので写真は動かない。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        val code = RecoveryCode.generate()
+        vault.storeRecoveryCode(master, code)
+
+        val recovered = newVault().unlockWithRecoveryCode(code.toCharArray())!!
+        newVault().resetPassphrase(recovered, "abcdef".toCharArray())
+
+        assertThat(newVault().unlockWithPassphrase("abcdef".toCharArray())!!.encoded)
+            .isEqualTo(master.encoded)
+        assertThat(newVault().unlockWithPassphrase(pin)).isNull()
+    }
+
+    @Test
+    fun `回復コードを捨てても暗証番号の包みは残る`() {
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        vault.storeRecoveryCode(master, RecoveryCode.generate())
+
+        vault.dropRecoveryCode()
+
+        assertThat(vault.hasRecoveryCode()).isFalse()
+        assertThat(newVault().unlockWithPassphrase(pin)!!.encoded).isEqualTo(master.encoded)
+    }
+
+    @Test
+    fun `回復コードの間違いも同じ待ちに数える`() {
+        // 総当たりの入口が二つある以上、片方だけ速く試せては意味がない。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        vault.storeRecoveryCode(master, RecoveryCode.generate())
+
+        repeat(4) { vault.unlockWithRecoveryCode(RecoveryCode.generate().toCharArray()) }
+
+        assertThat(vault.failedAttempts()).isEqualTo(4)
+        assertThat(vault.nextAttemptAllowedIn()).isGreaterThan(0)
+    }
+
+    @Test
     fun `間違えるほど次の入力までの待ちが伸びる`() {
         val vault = newVault()
         vault.initialize(pin)
@@ -170,16 +271,21 @@ class MasterKeyVaultTest {
     }
 
     @Test
-    fun `リセットすると両方の包みが消える`() {
+    fun `リセットすると三つの包みが全部消える`() {
         val vault = newVault()
         val master = vault.initialize(pin)
         vault.completeEnrollment(master, vault.enrollCipher()!!)
+        val code = RecoveryCode.generate()
+        vault.storeRecoveryCode(master, code)
 
         vault.reset()
 
         assertThat(vault.isInitialized()).isFalse()
         assertThat(vault.hasBiometricShortcut()).isFalse()
+        // 消し忘れると、作り直した金庫を前の紙が開けてしまう。
+        assertThat(vault.hasRecoveryCode()).isFalse()
         assertThat(newVault().unlockWithPassphrase(pin)).isNull()
+        assertThat(newVault().unlockWithRecoveryCode(code.toCharArray())).isNull()
     }
 
     @Test
