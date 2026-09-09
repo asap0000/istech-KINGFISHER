@@ -122,6 +122,13 @@ class KensaRelockMatrixTest {
                 )
             ) { "PIN setup did not finish" }
 
+            // Since v0.7.0 a recovery code is offered as soon as the PIN is set, drawn over
+            // the app (the same overlay KensaColdStartSmokeTest dismisses). It must be closed
+            // before the camera check below, which otherwise times out correctly: since
+            // 5378819 a covered screen no longer leaks into the accessibility tree.
+            device.wait(Until.findObject(By.textStartsWith("あとで")), SHORT_WAIT)?.click()
+            device.waitForIdle()
+
             // Dismiss optional biometric enrollment to keep this increment PIN-only.
             if (!device.wait(Until.hasObject(By.desc("保護フォルダを開く")), SHORT_WAIT)) {
                 device.pressBack()
