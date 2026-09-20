@@ -25,6 +25,29 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
+ * What trying to unwrap the shortcut's key came back with.
+ *
+ * A plain nullable `Cipher?` used to carry this, and `null` meant two different things at
+ * once: "the key is permanently gone" and "the key is fine but cannot be used right now"
+ * (lockout, a transient keystore error). Every caller read `null` as the first meaning and
+ * deleted the shortcut — so a fingerprint lockout deleted `master.bio` and the enrolled key
+ * right along with a truly invalidated one. Splitting the two at the type means a caller can
+ * no longer collapse them by accident.
+ */
+sealed interface ShortcutCipher {
+    data class Ready(val cipher: javax.crypto.Cipher) : ShortcutCipher
+
+    /** The key itself was invalidated (biometric re-enrollment, screen lock removed). The shortcut is over. */
+    object Invalidated : ShortcutCipher
+
+    /** Not usable right now (e.g. lockout), but the key is still alive. Must not be discarded. */
+    object Unavailable : ShortcutCipher
+
+    /** There is no shortcut enrolled at all. */
+    object None : ShortcutCipher
+}
+
+/**
  * The device-held key that guards the fingerprint shortcut in [MasterKeyVault].
  *
  * Split out behind an interface for one practical reason: the AndroidKeyStore does not exist
@@ -35,8 +58,8 @@ interface BiometricWrapper {
     /** A cipher for wrapping the master key, or null if the device cannot authenticate. */
     fun encryptCipher(): Cipher?
 
-    /** A cipher for unwrapping it, or null if the key is gone or unusable. */
-    fun decryptCipher(iv: ByteArray): Cipher?
+    /** A cipher for unwrapping it. See [ShortcutCipher] for what each outcome means. */
+    fun decryptCipher(iv: ByteArray): ShortcutCipher
 
     /** Removes the key, so the shortcut has to be enrolled again. */
     fun deleteKey()
@@ -72,19 +95,25 @@ class AndroidKeystoreWrapper(
         }
     }
 
-    override fun decryptCipher(iv: ByteArray): Cipher? {
-        val key = existingKey() ?: return null
+    override fun decryptCipher(iv: ByteArray): ShortcutCipher {
+        val key = existingKey() ?: return ShortcutCipher.None
         return try {
-            Cipher.getInstance(TRANSFORMATION).apply {
-                init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, iv))
-            }
+            ShortcutCipher.Ready(
+                Cipher.getInstance(TRANSFORMATION).apply {
+                    init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(TAG_BITS, iv))
+                }
+            )
         } catch (e: KeyPermanentlyInvalidatedException) {
             // Screen lock removed, or a new fingerprint enrolled. The shortcut is over;
             // the passphrase still opens the vault.
             deleteKey()
-            null
+            ShortcutCipher.Invalidated
         } catch (e: Exception) {
-            null
+            // Anything else — a fingerprint lockout is the case this was measured against —
+            // means the key is still alive but not usable right now. deleteKey() must NOT run
+            // here: that is exactly the bug this type split exists to close (a lockout used to
+            // read as "key gone" and take master.bio down with it).
+            ShortcutCipher.Unavailable
         }
     }
 

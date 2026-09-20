@@ -21,6 +21,7 @@ import androidx.lifecycle.viewModelScope
 import com.istech.privacycamera.PrivacyCameraApplication
 import com.istech.privacycamera.crypto.MasterKeyVault
 import com.istech.privacycamera.crypto.RecoveryCode
+import com.istech.privacycamera.crypto.ShortcutCipher
 import javax.crypto.Cipher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -203,8 +204,8 @@ class VaultViewModel @JvmOverloads constructor(
         }
     }
 
-    /** The cipher to hand `BiometricPrompt` for the fingerprint shortcut, or null if there is none. */
-    fun shortcutCipher(): Cipher? = vault.unlockCipher()
+    /** The cipher to hand `BiometricPrompt` for the fingerprint shortcut. See [ShortcutCipher]. */
+    fun shortcutCipher(): ShortcutCipher = vault.unlockCipher()
 
     /**
      * Finishes a shortcut unlock with the authenticated [cipher].

@@ -57,6 +57,7 @@ import com.istech.privacycamera.viewmodel.VaultViewModel
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.istech.privacycamera.auth.BiometricGate
+import com.istech.privacycamera.crypto.ShortcutCipher
 import kotlinx.coroutines.delay
 
 private enum class LockState { LOCKED, AUTHENTICATING, UNLOCKED }
@@ -113,21 +114,33 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
      * the user, so this is a real check rather than a screen in front of an open key.
      */
     fun useShortcut() {
-        val cipher = vaultModel.shortcutCipher()
-        if (cipher == null) {
+        when (val cipher = vaultModel.shortcutCipher()) {
+            // No shortcut enrolled — nothing to do; the passphrase field is already on screen.
+            is ShortcutCipher.None -> Unit
+
             // The keystore key is gone (screen lock removed, or a new fingerprint enrolled).
             // The passphrase field is already on screen, which is the whole point of keeping
             // two wrappings.
-            vaultModel.dropShortcut()
-            return
-        }
-        BiometricGate.authenticate(
-            activity,
-            cipher,
-            "写真を開くには認証が必要です"
-        ) { result, authenticated ->
-            if (result is BiometricGate.Result.Success && authenticated != null) {
-                if (!vaultModel.unlockWithShortcut(authenticated)) vaultModel.dropShortcut()
+            is ShortcutCipher.Invalidated -> vaultModel.dropShortcut()
+
+            // Not usable right now (e.g. biometric lockout) but the key is still alive — must
+            // not be dropped. This is the exact case measured to permanently delete the
+            // shortcut before this type split existed.
+            // TODO(段1b): ここで「指紋がいま使えません／暗証番号で開く」の画面を出す
+            is ShortcutCipher.Unavailable -> Unit
+
+            is ShortcutCipher.Ready -> BiometricGate.authenticate(
+                activity,
+                cipher.cipher,
+                "写真を開くには認証が必要です"
+            ) { result, authenticated ->
+                if (result is BiometricGate.Result.Success && authenticated != null) {
+                    // The return value is deliberately not acted on yet. It used to drop the
+                    // shortcut, which is the bug this change closes; doing nothing is safe but
+                    // silent, and the user is left tapping a button that appears to do nothing.
+                    // TODO(段1b): false のときも「指紋がいま使えません」の画面へ送る
+                    vaultModel.unlockWithShortcut(authenticated)
+                }
             }
         }
     }

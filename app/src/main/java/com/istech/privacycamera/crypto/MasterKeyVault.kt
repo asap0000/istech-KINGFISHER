@@ -189,26 +189,34 @@ class MasterKeyVault(
         bioFile.writeBytes(cipher.iv + body)
     }
 
-    /** A cipher to hand to `BiometricPrompt` when opening via the shortcut. */
-    fun unlockCipher(): Cipher? {
-        val blob = bioFile.takeIf { it.exists() }?.readBytes() ?: return null
-        return biometric.decryptCipher(blob.copyOfRange(0, IV_BYTES))
+    /**
+     * A cipher to hand to `BiometricPrompt` when opening via the shortcut.
+     *
+     * When the underlying key turns out to be [ShortcutCipher.Invalidated], `bioFile` is
+     * deleted here too — the wrapping is worthless without the key it depends on, and leaving
+     * it behind would just be a wrapping nobody can ever open again.
+     */
+    fun unlockCipher(): ShortcutCipher {
+        val blob = bioFile.takeIf { it.exists() }?.readBytes() ?: return ShortcutCipher.None
+        val result = biometric.decryptCipher(blob.copyOfRange(0, IV_BYTES))
+        if (result is ShortcutCipher.Invalidated) bioFile.delete()
+        return result
     }
 
     /**
      * Finishes an unlock through the shortcut with the authenticated [cipher].
      *
-     * Returns null when the wrapping no longer opens — the keystore key is gone because the
-     * user removed their screen lock or enrolled a new fingerprint. That is the case this
-     * design exists for: the shortcut is dropped and the passphrase still works, rather than
-     * the library becoming unreadable.
+     * Returns null on failure, but does **not** delete `bioFile` — authentication has already
+     * succeeded by the time this runs (`BiometricPrompt` only hands back a cipher once the
+     * user is verified), so a failure here is a transient decryption problem, not proof the
+     * wrapping is bad. Discarding the shortcut is a decision this method no longer makes; it
+     * is made solely by [unlockCipher] seeing [ShortcutCipher.Invalidated].
      */
     fun completeUnlock(cipher: Cipher): SecretKey? {
         val blob = bioFile.takeIf { it.exists() }?.readBytes() ?: return null
         return try {
             SecretKeySpec(cipher.doFinal(blob.copyOfRange(IV_BYTES, blob.size)), "AES")
         } catch (e: Exception) {
-            bioFile.delete()
             null
         }
     }

@@ -111,7 +111,10 @@ class MasterKeyVaultTest {
         vault.completeEnrollment(master, vault.enrollCipher()!!)
         assertThat(vault.hasBiometricShortcut()).isTrue()
 
-        val viaShortcut = newVault().let { it.completeUnlock(it.unlockCipher()!!) }
+        val viaShortcut = newVault().let {
+            val cipher = it.unlockCipher() as ShortcutCipher.Ready
+            it.completeUnlock(cipher.cipher)
+        }
         assertThat(viaShortcut!!.encoded).isEqualTo(master.encoded)
     }
 
@@ -125,8 +128,37 @@ class MasterKeyVaultTest {
         wrapper.invalidate() // 画面ロック解除・指紋の追加登録に相当
 
         val after = newVault()
-        assertThat(after.unlockCipher()).isNull()
+        assertThat(after.unlockCipher()).isEqualTo(ShortcutCipher.Invalidated)
         assertThat(after.unlockWithPassphrase(pin)!!.encoded).isEqualTo(master.encoded)
+    }
+
+    @Test
+    fun `一時的に使えないだけなら近道を捨てない`() {
+        // ロックアウト等の一過性の不調で `master.bio` と鍵が消えていた不具合の再発防止。
+        // 「今は使えない」と「鍵が無効」を型で分けたので、前者では何も消えてはならない。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        vault.completeEnrollment(master, vault.enrollCipher()!!)
+
+        wrapper.unavailable = true
+
+        val after = newVault()
+        assertThat(after.unlockCipher()).isEqualTo(ShortcutCipher.Unavailable)
+        assertThat(after.hasBiometricShortcut()).isTrue()
+    }
+
+    @Test
+    fun `鍵が無効になったら近道を捨てる`() {
+        // Invalidated のときだけ、捨てる判断をしてよい。
+        val vault = newVault()
+        val master = vault.initialize(pin)
+        vault.completeEnrollment(master, vault.enrollCipher()!!)
+
+        wrapper.invalidate()
+
+        val after = newVault()
+        assertThat(after.unlockCipher()).isEqualTo(ShortcutCipher.Invalidated)
+        assertThat(after.hasBiometricShortcut()).isFalse()
     }
 
     @Test
@@ -301,9 +333,14 @@ class MasterKeyVaultTest {
         }
     }
 
-    /** AndroidKeyStore の代わり。端末の鍵が使えなくなる状況を [invalidate] で作れる。 */
+    /**
+     * AndroidKeyStore の代わり。端末の鍵が使えなくなる状況を [invalidate] で作れる。
+     * [unavailable] は「鍵は生きているが今は使えない」（ロックアウト等）を作る——[invalidate]
+     * とは別の穴で、両者を型で分けたのがこの修正そのものなので、フェイクも別々に持つ。
+     */
     private class FakeWrapper : BiometricWrapper {
         var available = true
+        var unavailable = false
         private var key: SecretKey? = null
 
         fun invalidate() {
@@ -317,11 +354,14 @@ class MasterKeyVaultTest {
             return Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, k) }
         }
 
-        override fun decryptCipher(iv: ByteArray): Cipher? {
-            val k = key ?: return null
-            return Cipher.getInstance("AES/GCM/NoPadding").apply {
-                init(Cipher.DECRYPT_MODE, k, GCMParameterSpec(128, iv))
-            }
+        override fun decryptCipher(iv: ByteArray): ShortcutCipher {
+            val k = key ?: return ShortcutCipher.Invalidated
+            if (unavailable) return ShortcutCipher.Unavailable
+            return ShortcutCipher.Ready(
+                Cipher.getInstance("AES/GCM/NoPadding").apply {
+                    init(Cipher.DECRYPT_MODE, k, GCMParameterSpec(128, iv))
+                }
+            )
         }
 
         override fun deleteKey() {
