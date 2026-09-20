@@ -68,6 +68,12 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          # v3 の既定は "tools platform-tools"。旧 SDK Tools (`tools`) は Google の
+          # リポジトリから消えており、sdkmanager が "Failed to find package 'tools'" で
+          # 落ちる（2026-09-21 実測・09-14 の定期実行までは通っていた）。この行より後で
+          # 必要な package は明示的に入れているので、既定を空にせず明示で上書きする。
+          packages: 'platform-tools'
 
       # Caches Gradle dependencies & wrapper between runs -> much faster builds.
       - name: Set up Gradle (with caching)
