@@ -337,6 +337,34 @@ class VaultViewModelTest {
     }
 
     @Test
+    fun `自分で切ったときは、登録し直しの案内を出さない`() = runTest(dispatcher) {
+        // 設定のスイッチで切るのは利用者の選択なので、「使えなくなりました」と告げる
+        // 相手がいない。勝手に消えたときだけ案内する、の片方を固定する。
+        val model = VaultViewModel(app, dispatcher)
+        model.setUp(pin)
+        advanceUntilIdle()
+
+        model.dropShortcut()
+
+        assertThat(model.shortcutInvalidated.value).isFalse()
+    }
+
+    @Test
+    fun `勝手に消えたときは一度だけ案内し、応えたら降りる`() = runTest(dispatcher) {
+        // 黙って消さない、が裁定（2026-09-20 復唱3）。ただし毎回出すと、開くたびに
+        // 同じダイアログに阻まれる——だから「一度だけ」までを1組で見る。
+        val model = VaultViewModel(app, dispatcher)
+        model.setUp(pin)
+        advanceUntilIdle()
+
+        model.dropShortcut(invalidated = true)
+        assertThat(model.shortcutInvalidated.value).isTrue()
+
+        model.acknowledgeShortcutInvalidated()
+        assertThat(model.shortcutInvalidated.value).isFalse()
+    }
+
+    @Test
     fun `作り直すと写真も鍵も消えて設定に戻る`() = runTest(dispatcher) {
         val model = VaultViewModel(app, dispatcher)
         model.setUp(pin)

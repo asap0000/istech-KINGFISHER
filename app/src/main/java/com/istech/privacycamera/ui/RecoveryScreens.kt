@@ -182,7 +182,9 @@ internal fun RecoveryUnlockScreen(
     /** Milliseconds the user must wait before trying again; 0 when they may go ahead. */
     lockedOutFor: Long,
     onSubmit: (CharArray) -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    /** The one road left once this one is gone too — the caller sends this to the reset step. */
+    onCantFind: () -> Unit
 ) {
     var code by remember { mutableStateOf("") }
     val waiting = lockedOutFor > 0
@@ -231,6 +233,10 @@ internal fun RecoveryUnlockScreen(
         ) { Text("開く") }
         Spacer(Modifier.height(12.dp))
         TextButton(onClick = onCancel) { Text("暗証番号の入力に戻る") }
+        // Named on this screen and nowhere earlier: someone who has not yet tried the code
+        // has no business being offered "作り直す" — that door only opens once this one has
+        // also failed.
+        TextButton(onClick = onCantFind) { Text("回復コードも見つからない") }
     }
 }
 

@@ -60,18 +60,15 @@ class VaultScreensScreenshotTest {
     }
 
     @Test
-    fun `ロック画面は指紋と暗証番号と回復コードを出す`() {
+    fun `暗証番号だけの画面は暗証番号の欄と開けない導線を出す`() {
+        // 一本ずつの裁定後: 指紋のボタンも回復コードの導線もこの画面には出ない。
         compose.setContent {
             PrivacyCameraTheme {
-                VaultUnlockScreen(
-                    showShortcut = true,
-                    showRecovery = true,
+                VaultPassphraseScreen(
                     lastAttemptFailed = false,
                     lockedOutFor = 0,
                     onSubmit = {},
-                    onUseShortcut = {},
-                    onUseRecovery = {},
-                    onForgot = {}
+                    onCantUnlock = {}
                 )
             }
         }
@@ -83,19 +80,47 @@ class VaultScreensScreenshotTest {
         // 「開く」が押せないだけだと、壊れたのか待たされているのか区別がつかない。
         compose.setContent {
             PrivacyCameraTheme {
-                VaultUnlockScreen(
-                    showShortcut = false,
-                    showRecovery = false,
+                VaultPassphraseScreen(
                     lastAttemptFailed = true,
                     lockedOutFor = 4_000,
                     onSubmit = {},
-                    onUseShortcut = {},
-                    onUseRecovery = {},
-                    onForgot = {}
+                    onCantUnlock = {}
                 )
             }
         }
         compose.onRoot().captureRoboImage("${Screenshots.DIR}/vault_unlock_waiting.png")
+    }
+
+    @Test
+    fun `指紋だけの画面は指紋のボタンと暗証番号への逃げ道だけを出す`() {
+        compose.setContent {
+            PrivacyCameraTheme {
+                VaultFingerprintScreen(onUseShortcut = {}, onUsePassphrase = {})
+            }
+        }
+        compose.onRoot().captureRoboImage("${Screenshots.DIR}/vault_fingerprint.png")
+    }
+
+    @Test
+    fun `指紋が使えないときは暗証番号で開くボタン1つだけを出す`() {
+        compose.setContent {
+            PrivacyCameraTheme {
+                ShortcutUnavailableScreen(onUsePassphrase = {})
+            }
+        }
+        compose.onRoot().captureRoboImage("${Screenshots.DIR}/vault_shortcut_unavailable.png")
+    }
+
+    @Test
+    fun `近道が無効化されたら開いたあとに一度だけ登録し直しを案内する`() {
+        compose.setContent {
+            PrivacyCameraTheme {
+                ShortcutInvalidatedDialog(onReenroll = {}, onDismiss = {})
+            }
+        }
+        // ダイアログは別ウィンドウなので root が2つになる。後ろ側がダイアログ本体。
+        compose.onAllNodes(isRoot()).onLast()
+            .captureRoboImage("${Screenshots.DIR}/vault_shortcut_invalidated.png")
     }
 
     @Test
@@ -159,7 +184,8 @@ class VaultScreensScreenshotTest {
                     lastAttemptFailed = false,
                     lockedOutFor = 0,
                     onSubmit = {},
-                    onCancel = {}
+                    onCancel = {},
+                    onCantFind = {}
                 )
             }
         }

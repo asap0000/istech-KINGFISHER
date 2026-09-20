@@ -62,6 +62,27 @@ import kotlinx.coroutines.delay
 
 private enum class LockState { LOCKED, AUTHENTICATING, UNLOCKED }
 
+/**
+ * The local state machine for [VaultViewModel.Stage.LOCKED]: one door shown at a time.
+ *
+ * Order matters and is the whole point (裁定 2026-09-20): fingerprint first where one is
+ * enrolled, then the passphrase, then the recovery code, and only then the irreversible
+ * reset — never more than one offered on the same screen.
+ */
+private enum class LockStep {
+    Fingerprint,
+    ShortcutUnavailable,
+    Passphrase,
+    RecoveryCode,
+
+    /**
+     * Not a screen of its own — [ForgotPassphraseDialog] is layered over the passphrase step
+     * for this one. Reusing that background rather than inventing a bare one keeps the reset
+     * confirmation from ever being the first thing a locked screen shows.
+     */
+    Reset
+}
+
 /** Auto-lock after this much inactivity (no touch). Adjust to taste. */
 private const val AUTO_LOCK_MS = 120_000L
 
@@ -83,11 +104,13 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     val recoveryFailed by vaultModel.recoveryFailed.collectAsState()
     val lockedOutFor by vaultModel.lockedOutFor.collectAsState()
     val hasRecoveryCode by vaultModel.hasRecoveryCode.collectAsState()
-    var showReset by remember { mutableStateOf(false) }
-    // The recovery-code field, reached from the lock screen. Local rather than a stage,
-    // because nothing has happened yet — it is still the same locked vault, seen from the
-    // other door, and backing out must cost nothing.
-    var enteringRecoveryCode by remember { mutableStateOf(false) }
+    val shortcutInvalidated by vaultModel.shortcutInvalidated.collectAsState()
+    // Which door LOCKED is currently showing. Local rather than a Stage of its own, because
+    // nothing has happened yet — it is still the same locked vault, seen from a different
+    // door, and moving between doors must cost nothing.
+    var lockStep by remember {
+        mutableStateOf(if (vaultModel.hasShortcut) LockStep.Fingerprint else LockStep.Passphrase)
+    }
     // A code generated but not yet stored, and whether "あとで" is on offer. Held here until
     // the user has copied a group back: an unconfirmed code is characters on a screen, and
     // storing it early would retire the paper the user still has.
@@ -106,7 +129,13 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     // the one secret this app never shows twice over a lock screen the user just triggered.
     LaunchedEffect(stage) {
         if (stage != VaultViewModel.Stage.OPEN) pendingCode = null
-        if (stage != VaultViewModel.Stage.LOCKED) enteringRecoveryCode = false
+        // Every fresh arrival at LOCKED starts from the same door: fingerprint when one is
+        // enrolled, passphrase otherwise. Without this, backing out of the app mid-recovery
+        // and coming back would resume on whichever door was last shown instead of the one
+        // the policy says to lead with.
+        if (stage == VaultViewModel.Stage.LOCKED) {
+            lockStep = if (vaultModel.hasShortcut) LockStep.Fingerprint else LockStep.Passphrase
+        }
     }
 
     /**
@@ -115,19 +144,27 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
      */
     fun useShortcut() {
         when (val cipher = vaultModel.shortcutCipher()) {
-            // No shortcut enrolled — nothing to do; the passphrase field is already on screen.
+            // No shortcut enrolled. Should not normally be reachable from the fingerprint
+            // screen (it is only shown when one exists), but if the shortcut vanished between
+            // composing that screen and this tap, its own "暗証番号で開く" link is the way out
+            // — nothing further to do here.
             is ShortcutCipher.None -> Unit
 
             // The keystore key is gone (screen lock removed, or a new fingerprint enrolled).
-            // The passphrase field is already on screen, which is the whole point of keeping
-            // two wrappings.
-            is ShortcutCipher.Invalidated -> vaultModel.dropShortcut()
+            // Drop the shortcut and move on to the passphrase in the same breath: the road
+            // this screen offers has just ceased to exist, and leaving the user on it would
+            // leave a button that does nothing — the one thing "道は一本ずつ" is meant to
+            // prevent. The dialog explaining why is deferred to Stage.OPEN, because it asks
+            // to re-enrol and that needs the master key in hand (see shortcutInvalidated).
+            is ShortcutCipher.Invalidated -> {
+                vaultModel.dropShortcut(invalidated = true)
+                lockStep = LockStep.Passphrase
+            }
 
             // Not usable right now (e.g. biometric lockout) but the key is still alive — must
             // not be dropped. This is the exact case measured to permanently delete the
             // shortcut before this type split existed.
-            // TODO(段1b): ここで「指紋がいま使えません／暗証番号で開く」の画面を出す
-            is ShortcutCipher.Unavailable -> Unit
+            is ShortcutCipher.Unavailable -> lockStep = LockStep.ShortcutUnavailable
 
             is ShortcutCipher.Ready -> BiometricGate.authenticate(
                 activity,
@@ -135,11 +172,14 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 "写真を開くには認証が必要です"
             ) { result, authenticated ->
                 if (result is BiometricGate.Result.Success && authenticated != null) {
-                    // The return value is deliberately not acted on yet. It used to drop the
-                    // shortcut, which is the bug this change closes; doing nothing is safe but
-                    // silent, and the user is left tapping a button that appears to do nothing.
-                    // TODO(段1b): false のときも「指紋がいま使えません」の画面へ送る
-                    vaultModel.unlockWithShortcut(authenticated)
+                    // A false return means the wrapping did not actually open the vault (the
+                    // key was accepted by BiometricPrompt but no longer unwraps anything
+                    // useful). Silently doing nothing here used to leave the user tapping a
+                    // button with no visible effect; routing to the same screen as a lockout
+                    // gives them the one door that is still open.
+                    if (!vaultModel.unlockWithShortcut(authenticated)) {
+                        lockStep = LockStep.ShortcutUnavailable
+                    }
                 }
             }
         }
@@ -243,26 +283,50 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 }
             )
 
-            VaultViewModel.Stage.LOCKED ->
-                if (enteringRecoveryCode) {
-                    RecoveryUnlockScreen(
-                        lastAttemptFailed = recoveryFailed,
-                        lockedOutFor = lockedOutFor,
-                        onSubmit = { vaultModel.unlockWithRecoveryCode(it) },
-                        onCancel = { enteringRecoveryCode = false }
+            VaultViewModel.Stage.LOCKED -> {
+                when (lockStep) {
+                    LockStep.Fingerprint -> VaultFingerprintScreen(
+                        onUseShortcut = { useShortcut() },
+                        onUsePassphrase = { lockStep = LockStep.Passphrase }
                     )
-                } else {
-                    VaultUnlockScreen(
-                        showShortcut = vaultModel.hasShortcut,
-                        showRecovery = hasRecoveryCode,
+
+                    LockStep.ShortcutUnavailable -> ShortcutUnavailableScreen(
+                        onUsePassphrase = { lockStep = LockStep.Passphrase }
+                    )
+
+                    // Reset shares this background rather than standing on a blank screen of
+                    // its own: the dialog drawn below is a modal overlay, not a replacement,
+                    // and the passphrase field stays exactly where "やめる" returns to.
+                    LockStep.Passphrase, LockStep.Reset -> VaultPassphraseScreen(
                         lastAttemptFailed = attemptFailed,
                         lockedOutFor = lockedOutFor,
                         onSubmit = { vaultModel.unlock(it) },
-                        onUseShortcut = { useShortcut() },
-                        onUseRecovery = { enteringRecoveryCode = true },
-                        onForgot = { showReset = true }
+                        onCantUnlock = {
+                            lockStep = if (hasRecoveryCode) LockStep.RecoveryCode else LockStep.Reset
+                        }
+                    )
+
+                    LockStep.RecoveryCode -> RecoveryUnlockScreen(
+                        lastAttemptFailed = recoveryFailed,
+                        lockedOutFor = lockedOutFor,
+                        onSubmit = { vaultModel.unlockWithRecoveryCode(it) },
+                        onCancel = { lockStep = LockStep.Passphrase },
+                        onCantFind = { lockStep = LockStep.Reset }
                     )
                 }
+                // The one screen this policy keeps off the front door: shown only once both
+                // the passphrase and (where one exists) the recovery code have been named as
+                // unreachable.
+                if (lockStep == LockStep.Reset) {
+                    ForgotPassphraseDialog(
+                        hasRecoveryCode = hasRecoveryCode,
+                        onConfirm = {
+                            vaultModel.resetEverything { }
+                        },
+                        onDismiss = { lockStep = LockStep.Passphrase }
+                    )
+                }
+            }
 
             VaultViewModel.Stage.RECOVERING -> RecoveryNewPassphraseScreen(
                 onSubmit = { next ->
@@ -295,17 +359,51 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
             )
         }
 
-        if (showReset) {
-            ForgotPassphraseDialog(
-                hasRecoveryCode = hasRecoveryCode,
-                onConfirm = {
-                    showReset = false
-                    vaultModel.resetEverything { }
+        // A shortcut that died on its own is announced once, straight after the vault opens —
+        // never silently, and never over a lock screen the user has not yet proven they can
+        // get past on their own.
+        if (stage == VaultViewModel.Stage.OPEN && shortcutInvalidated) {
+            ShortcutInvalidatedDialog(
+                onReenroll = {
+                    vaultModel.acknowledgeShortcutInvalidated()
+                    enrollShortcutIfPossible(activity, vaultModel) { }
                 },
-                onDismiss = { showReset = false }
+                onDismiss = { vaultModel.acknowledgeShortcutInvalidated() }
             )
         }
     }
+}
+
+/**
+ * Told once, right after the vault opens, that the fingerprint shortcut has stopped working on
+ * its own — not because the user turned it off.
+ *
+ * Waiting for [VaultViewModel.Stage.OPEN] rather than showing this the moment the key dies is
+ * deliberate: whoever is here has just proven they hold the passphrase, which is the one thing
+ * that makes "would you like to re-enroll?" a safe question to ask rather than an invitation
+ * handed to whoever is holding the unlocked lock screen.
+ */
+@Composable
+internal fun ShortcutInvalidatedDialog(
+    onReenroll: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("指紋で開けなくなりました") },
+        text = {
+            Text(
+                "指の登録が変わったか、画面ロックの設定が変わったため、" +
+                    "指紋の近道が使えなくなりました。いま登録し直せます。"
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onReenroll) { Text("登録し直す") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("あとで") }
+        }
+    )
 }
 
 /**

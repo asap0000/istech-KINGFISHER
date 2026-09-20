@@ -55,21 +55,17 @@ class VaultFrameTouchTest {
     private var behindTaps = 0
 
     /** ロック画面の下に、画面いっぱいの「押せる何か」を敷いた状態を作る。 */
-    private fun lockedOverSomethingClickable(onUseRecovery: () -> Unit = {}) {
+    private fun lockedOverSomethingClickable(onCantUnlock: () -> Unit = {}) {
         behindTaps = 0
         compose.setContent {
             PrivacyCameraTheme {
                 Box(modifier = Modifier.fillMaxSize()) {
                     Box(modifier = Modifier.fillMaxSize().clickable { behindTaps++ })
-                    VaultUnlockScreen(
-                        showShortcut = false,
-                        showRecovery = true,
+                    VaultPassphraseScreen(
                         lastAttemptFailed = false,
                         lockedOutFor = 0,
                         onSubmit = {},
-                        onUseShortcut = {},
-                        onUseRecovery = onUseRecovery,
-                        onForgot = {}
+                        onCantUnlock = onCantUnlock
                     )
                 }
             }
@@ -91,15 +87,15 @@ class VaultFrameTouchTest {
     fun `後ろに届かないだけで、画面自身の操作は効く`() {
         // 吸い込みを効かせすぎて自分の部品まで死ぬと、ロックを解けなくなる。片方だけでは
         // 固定にならないので、両方を1組で見る。
-        var recoveryTapped = false
-        lockedOverSomethingClickable(onUseRecovery = { recoveryTapped = true })
+        var cantUnlockTapped = false
+        lockedOverSomethingClickable(onCantUnlock = { cantUnlockTapped = true })
 
         // performTouchInput は実際のポインタ経路を通る（performClick のように semantics へ
         // 直接送るのではない）ので、当たり判定そのものを見ていることになる。
-        compose.onNodeWithText("回復コードで開く").performTouchInput { click() }
+        compose.onNodeWithText("暗証番号で開けない").performTouchInput { click() }
         compose.waitForIdle()
 
-        assertThat(recoveryTapped).isTrue()
+        assertThat(cantUnlockTapped).isTrue()
         assertThat(behindTaps).isEqualTo(0)
     }
 

@@ -33,7 +33,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -128,37 +127,77 @@ internal fun VaultSetupScreen(
 }
 
 /**
- * The lock screen once a passphrase exists.
+ * The lock screen's fingerprint-only door.
  *
- * The fingerprint button is offered first where one is enrolled, because that is the way in
- * people will use daily; the field below it is always there, since the fingerprint can stop
- * working for reasons that have nothing to do with the app.
+ * One road at a time: this screen offers nothing but the fingerprint prompt and a small way
+ * out for the finger that will not cooperate. The passphrase field, the recovery code, and
+ * "忘れた" all live one step further in — showing them here would put four locks on the door
+ * when only one is meant to be tried first (裁定 2026-09-20, 道は一本ずつ).
  */
 @Composable
-internal fun VaultUnlockScreen(
-    showShortcut: Boolean,
-    /** True when a recovery code has been issued, so there is a second door to offer. */
-    showRecovery: Boolean,
+internal fun VaultFingerprintScreen(
+    onUseShortcut: () -> Unit,
+    onUsePassphrase: () -> Unit
+) {
+    VaultFrame(icon = Icons.Filled.Fingerprint, title = "ロックされています") {
+        Text(
+            "指紋で開いてください",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onUseShortcut) {
+            Icon(Icons.Filled.Fingerprint, contentDescription = null)
+            Spacer(Modifier.size(8.dp))
+            Text("指紋で開く")
+        }
+        Spacer(Modifier.height(20.dp))
+        // The one escape hatch this screen keeps: a finger that will not cooperate must not be
+        // a dead end just because the passphrase field is one step away rather than beside it.
+        TextButton(onClick = onUsePassphrase) { Text("暗証番号で開く") }
+    }
+}
+
+/**
+ * Shown in place of the fingerprint screen when the key is alive but the sensor is not
+ * usable right now — a biometric lockout is the case this exists for.
+ *
+ * Says "しばらく" rather than a countdown: the device's own biometric lockout timer is not
+ * something this app can read, so naming a number here would be a guess dressed as a fact.
+ */
+@Composable
+internal fun ShortcutUnavailableScreen(onUsePassphrase: () -> Unit) {
+    VaultFrame(icon = Icons.Filled.Fingerprint, title = "指紋がいま使えません") {
+        Text(
+            "続けて間違えたため、端末が指紋をしばらく止めています。" +
+                "登録は消えていません。使えるようになれば、また指紋で開けます。",
+            style = MaterialTheme.typography.bodyMedium,
+            textAlign = TextAlign.Center
+        )
+        Spacer(Modifier.height(24.dp))
+        Button(onClick = onUsePassphrase) { Text("暗証番号で開く") }
+    }
+}
+
+/**
+ * The lock screen's passphrase-only door.
+ *
+ * No fingerprint button and no recovery-code link here — those are their own steps now. This
+ * screen keeps exactly one way further out: "暗証番号で開けない", which the caller routes
+ * onward to whichever of recovery-code or reset is actually reachable.
+ */
+@Composable
+internal fun VaultPassphraseScreen(
     lastAttemptFailed: Boolean,
     /** Milliseconds the user must wait before trying again; 0 when they may go ahead. */
     lockedOutFor: Long,
     onSubmit: (CharArray) -> Unit,
-    onUseShortcut: () -> Unit,
-    onUseRecovery: () -> Unit,
-    onForgot: () -> Unit
+    onCantUnlock: () -> Unit
 ) {
     var pass by remember { mutableStateOf("") }
     val waiting = lockedOutFor > 0
 
     VaultFrame(icon = Icons.Filled.Lock, title = "ロックされています") {
-        if (showShortcut) {
-            OutlinedButton(onClick = onUseShortcut) {
-                Icon(Icons.Filled.Fingerprint, contentDescription = null)
-                Spacer(Modifier.size(8.dp))
-                Text("指紋で開く")
-            }
-            Spacer(Modifier.height(20.dp))
-        }
         OutlinedTextField(
             value = pass,
             onValueChange = { pass = it },
@@ -190,12 +229,7 @@ internal fun VaultUnlockScreen(
             onClick = { onSubmit(pass.toCharArray()); pass = "" }
         ) { Text("開く") }
         Spacer(Modifier.height(12.dp))
-        // Offered only where a code exists. Naming a way in that was never issued would send
-        // someone hunting for a piece of paper they never had, at the worst possible moment.
-        if (showRecovery) {
-            TextButton(onClick = onUseRecovery) { Text("回復コードで開く") }
-        }
-        TextButton(onClick = onForgot) { Text("暗証番号を忘れた") }
+        TextButton(onClick = onCantUnlock) { Text("暗証番号で開けない") }
     }
 }
 

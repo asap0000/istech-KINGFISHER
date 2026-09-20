@@ -107,6 +107,24 @@ class VaultViewModel @JvmOverloads constructor(
     val hasShortcut: Boolean get() = vault.hasBiometricShortcut()
 
     /**
+     * True once, after the fingerprint shortcut has died on its own — screen lock changed, a
+     * new fingerprint enrolled — rather than the user switching it off in settings.
+     *
+     * A stream rather than a one-shot event because the screen that must react to it
+     * ([AppLockGate]) is not necessarily the one composed at the moment the shortcut dies: the
+     * drop happens on the lock screen, but the dialog it drives can only be shown once the
+     * vault is [Stage.OPEN] — showing it over a lock screen would ask someone to make a choice
+     * about a feature whose replacement (the passphrase) they have not proven they hold yet.
+     */
+    private val _shortcutInvalidated = MutableStateFlow(false)
+    val shortcutInvalidated: StateFlow<Boolean> = _shortcutInvalidated.asStateFlow()
+
+    /** Clears [shortcutInvalidated] once the dialog it drives has been answered, either way. */
+    fun acknowledgeShortcutInvalidated() {
+        _shortcutInvalidated.value = false
+    }
+
+    /**
      * Whether a recovery code is on somebody's paper, as a stream.
      *
      * A stream rather than a getter because two screens react to it and neither recomposes on
@@ -236,7 +254,20 @@ class VaultViewModel @JvmOverloads constructor(
         }
     }
 
-    fun dropShortcut() = vault.dropBiometricShortcut()
+    /**
+     * Drops the shortcut, so the next lock screen asks for the passphrase instead of offering
+     * a fingerprint.
+     *
+     * @param invalidated true when the key died on its own (screen lock changed, a new
+     *   fingerprint enrolled) rather than the user switching the setting off. Only that case
+     *   raises [shortcutInvalidated] — flipping the settings switch off is a choice the user
+     *   just made, not a loss, and offering to "re-enroll" a thing they only just turned off
+     *   would be a strange thing for the app to say back to them.
+     */
+    fun dropShortcut(invalidated: Boolean = false) {
+        vault.dropBiometricShortcut()
+        if (invalidated) _shortcutInvalidated.value = true
+    }
 
     // ---- the recovery code ---------------------------------------------------------------
 
