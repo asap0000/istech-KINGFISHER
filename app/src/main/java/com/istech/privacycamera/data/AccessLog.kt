@@ -51,6 +51,7 @@ object AccessActions {
     const val EXPORT = "EXPORT"   // masked copy exported to gallery
     const val DELETE = "DELETE"   // photo deleted
     const val EDIT = "EDIT"       // original edited (brightness/contrast/crop) & re-saved
+    const val CAPTURE_LOCKED = "CAPTURE_LOCKED" // photo taken while the vault was closed (sealed)
 
     // File-level operations (whole-library imports/exports). These move data across the
     // app boundary, so they are audited too — notably MIGRATE_EXPORT, which lets the
@@ -77,6 +78,7 @@ object AccessActions {
         EXPORT -> "マスク版を書き出し"
         DELETE -> "削除"
         EDIT -> "編集"
+        CAPTURE_LOCKED -> "未解錠で撮影"
         MIGRATE_EXPORT -> "移行書き出し（平文）"
         BACKUP_EXPORT -> "暗号化バックアップ書き出し"
         MIGRATE_IMPORT -> "移行取り込み"

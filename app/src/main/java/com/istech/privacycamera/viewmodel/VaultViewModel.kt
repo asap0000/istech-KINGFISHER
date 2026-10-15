@@ -386,6 +386,10 @@ class VaultViewModel @JvmOverloads constructor(
                 store.eraseEverything()
                 vault.reset()
                 session.close()
+                // eraseEverything leaves the keys folder alone, so the sealing pair has to be
+                // named. Left behind it would be a key pair for a library that no longer exists,
+                // wrapped under a master key that no longer exists.
+                session.forgetSealKeys()
                 session.clearMigrationMark()
             }
             _hasRecoveryCode.value = false
@@ -438,6 +442,11 @@ class VaultViewModel @JvmOverloads constructor(
      */
     private fun finishOpening(then: Stage = Stage.OPEN) {
         openingInProgress = false
+        // Every way in ends here — passphrase, fingerprint, first setup, and the recovery code,
+        // which does not pass through migrateThenOpen — so this is the one place that cannot
+        // miss a route. Generating the pair is slow (RSA), hence IO. Idempotent, and a no-op if
+        // the vault closes before it gets to write.
+        viewModelScope.launch(io) { session.ensureSealKeys() }
         if (lockRequestedWhileOpening) {
             lockRequestedWhileOpening = false
             session.close()

@@ -40,9 +40,11 @@ class PrivacyCameraApplication : Application() {
      *
      * Reading a photo is now impossible until the vault is open — which is the point of the
      * change: authentication used to be a screen in front of a key that worked regardless.
+     * Writing is the exception, on purpose: [SecurePhotoStore.saveSealed] seals with the public
+     * half of a key pair and needs no key in hand, so a photo can be taken before unlocking.
      */
     val photoStore: SecurePhotoStore by lazy {
-        SecurePhotoStore(this, vaultSession::encrypt, vaultSession::decrypt)
+        SecurePhotoStore(this, vaultSession::encrypt, vaultSession::decrypt, vaultSession::seal)
     }
     val appSettings: AppSettings by lazy { AppSettings(this) }
 

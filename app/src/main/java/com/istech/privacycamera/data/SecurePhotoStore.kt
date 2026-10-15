@@ -23,6 +23,8 @@ import android.graphics.Matrix
 import android.os.Environment
 import android.provider.MediaStore
 import com.istech.privacycamera.crypto.CryptoManager
+import com.istech.privacycamera.crypto.SealKeyUnavailableException
+import com.istech.privacycamera.crypto.VaultClosedException
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
@@ -67,7 +69,14 @@ class SecurePhotoStore(
      * capable of losing a user's memos if it is wrong. Testing it beats leaving it unproven.
      */
     private val encryptBytes: (ByteArray) -> ByteArray = CryptoManager::encrypt,
-    private val decryptBytes: (ByteArray) -> ByteArray = CryptoManager::decrypt
+    private val decryptBytes: (ByteArray) -> ByteArray = CryptoManager::decrypt,
+    /**
+     * Writes without the master key: seals bytes so only the opened vault can read them back.
+     * Null where sealing does not exist (older call sites, tests that never close the vault);
+     * production passes `VaultSession::seal`. Reading needs no counterpart: [decryptBytes]
+     * recognises a seal on its own.
+     */
+    private val sealBytes: ((ByteArray) -> ByteArray)? = null
 ) {
 
     private val baseDir = File(context.filesDir, "secure").apply { mkdirs() }
@@ -92,6 +101,10 @@ class SecurePhotoStore(
     // array per calendar month, and removed from accessLogFile. See compactAccessLogIfNeeded.
     private val logArchiveDir = File(baseDir, "log_archive").apply { mkdirs() }
     private val importedUuidsFile = File(baseDir, "migration_imported.json")
+    // Access-log lines for photos taken while the vault was closed. The log itself is encrypted
+    // under the master key, which is not in hand then, so each line waits here as its own sealed
+    // file until the next unlock folds it in (see foldPendingLog).
+    private val pendingLogDir = File(baseDir, "pending_log")
     // Persistent tombstones: uuids the user deleted ON THIS install. A backup restore skips
     // these so it never resurrects something deleted here — even after the 30-day trash
     // window has purged the photo. A different device starts with an empty set, so a backup
@@ -159,6 +172,146 @@ class SecurePhotoStore(
         writeMeta(id, uuid, caption, category, createdAt)
 
         return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
+    }
+
+    /**
+     * Persists a freshly captured JPEG while the vault may be closed.
+     *
+     * Same result as [save], but the original and the memo are sealed with [sealBytes] rather
+     * than encrypted under the master key, and NOTHING existing is read: with the vault closed
+     * there is nothing readable to consult, and consulting it is how records get lost.
+     *
+     * Order is original, memo, and the masked preview LAST. [list] finds photos by their
+     * preview, so a crash part-way leaves files no listing will show; and if anything throws,
+     * every file written for this id is removed before the exception goes on. A photo is
+     * either all there or not there at all.
+     *
+     * @param jpegBytes already upright.
+     */
+    fun saveSealed(
+        jpegBytes: ByteArray,
+        caption: String = "",
+        category: String = PhotoCategories.UNCLASSIFIED
+    ): PhotoItem {
+        val seal = sealBytes ?: throw IllegalStateException("sealing is not available")
+        val source = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
+            ?: throw IllegalArgumentException("Not a decodable image")
+        val uuid = java.util.UUID.randomUUID().toString()
+        val createdAt = System.currentTimeMillis()
+        val id = newId()
+        val maskedFile = File(maskedDir, "$id.jpg")
+        try {
+            writeAtomically(File(originalsDir, "$id.enc")) { seal(jpegBytes) }
+            writeAtomically(File(metaDir, "$id.enc")) {
+                seal(metaJson(uuid, caption, category, createdAt).toString().toByteArray(Charsets.UTF_8))
+            }
+            val masked = MaskingEngine.mask(source)
+            try {
+                writeAtomically(maskedFile) {
+                    ByteArrayOutputStream().also { masked.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+                        .toByteArray()
+                }
+            } finally {
+                masked.recycle()
+            }
+        } catch (e: Throwable) {
+            removeEverythingFor(id)
+            throw e
+        } finally {
+            source.recycle()
+        }
+        return PhotoItem(id, uuid, maskedFile, createdAt, caption, category)
+    }
+
+    /**
+     * Replaces the memo of a photo that was just taken, whole, sealed, without reading it.
+     *
+     * A photo captured while closed has nothing in its record but what [saveSealed] put there,
+     * so there is nothing to merge with: overwriting is exact, and reading first would need the
+     * key this path exists to do without.
+     */
+    fun rewriteSealedMeta(id: String, uuid: String, createdAt: Long, caption: String, category: String) {
+        val seal = sealBytes ?: throw IllegalStateException("sealing is not available")
+        val bytes = seal(metaJson(uuid, caption, category, createdAt).toString().toByteArray(Charsets.UTF_8))
+        writeAtomically(File(metaDir, "$id.enc")) { bytes }
+        File(metaDir, "$id.json").delete()
+    }
+
+    /**
+     * How many live photos there are. Counts previews rather than decrypting anything, so it
+     * is right whether the vault is open or closed, which is what a storage cap needs.
+     */
+    fun photoCount(): Int = maskedDir.listFiles { f -> f.extension == "jpg" }?.size ?: 0
+
+    /**
+     * Queues the access-log line for a photo taken while closed, as the sealed file
+     * `<timestamp>_<photoId>.seal`. [foldPendingLog] moves it into the real log after the next
+     * unlock, with the time it happened rather than the time it was noticed.
+     */
+    fun appendSealedCaptureLog(photoId: String, timestamp: Long) {
+        val seal = sealBytes ?: throw IllegalStateException("sealing is not available")
+        val line = JSONObject()
+            .put("t", timestamp)
+            .put("a", AccessActions.CAPTURE_LOCKED)
+            .put("id", photoId)
+        pendingLogDir.mkdirs()
+        val bytes = seal(line.toString().toByteArray(Charsets.UTF_8))
+        writeAtomically(File(pendingLogDir, "${timestamp}_$photoId.seal")) { bytes }
+    }
+
+    /**
+     * Folds queued capture lines into the access log, oldest first, each at its own time, and
+     * removes each queued file only after its line is in. Call only while the vault is open.
+     *
+     * If the key turns out not to be there after all (closed again, or the sealing key did not
+     * load) it stops and leaves everything queued. A file that cannot be read for any other
+     * reason is left where it is too: dropping a line silently would hide that a photo was taken.
+     */
+    fun foldPendingLog() {
+        val files = pendingLogDir.listFiles { f -> f.isFile && f.extension == "seal" } ?: return
+        val lines = mutableListOf<Pair<File, JSONObject>>()
+        for (file in files) {
+            try {
+                lines += file to JSONObject(String(decryptBytes(file.readBytes()), Charsets.UTF_8))
+            } catch (e: VaultClosedException) {
+                return
+            } catch (e: SealKeyUnavailableException) {
+                return
+            } catch (e: Exception) {
+                // Unreadable for another reason: keep the file, fold the rest.
+            }
+        }
+        for ((file, line) in lines.sortedBy { it.second.optLong("t") }) {
+            logAccessAt(line.optLong("t"), line.optString("id"), line.optString("a"), caption = "")
+            file.delete()
+        }
+    }
+
+    private fun metaJson(uuid: String, caption: String, category: String, createdAt: Long) =
+        JSONObject()
+            .put("uuid", uuid)
+            .put("caption", caption)
+            .put("category", category)
+            .put("createdAt", createdAt)
+
+    /** Stages [bytes] in a uniquely named neighbour and renames it into place. */
+    private fun writeAtomically(target: File, bytes: () -> ByteArray) {
+        val tmp = File(target.parentFile, "${target.name}.tmp.${System.nanoTime()}")
+        try {
+            tmp.writeBytes(bytes())
+            if (!tmp.renameTo(target)) {
+                target.writeBytes(tmp.readBytes())
+            }
+        } finally {
+            tmp.delete()
+        }
+    }
+
+    /** Removes every file [saveSealed] may have written for [id], finished or staged. */
+    private fun removeEverythingFor(id: String) {
+        listOf(originalsDir, metaDir, maskedDir).forEach { dir ->
+            dir.listFiles { f -> f.name.startsWith("$id.") }?.forEach { it.delete() }
+        }
     }
 
     /** Returns a storage id (file-name key) not already in use. */
@@ -277,9 +430,11 @@ class SecurePhotoStore(
      */
     fun delete(id: String) {
         val deletedAt = System.currentTimeMillis()
+        // Read the record BEFORE moving anything: if it cannot be read because the key is not
+        // in hand, this must throw with the photo still where it was, not half in the trash.
+        val meta = readMeta(id) ?: JSONObject()
         move(File(originalsDir, "$id.enc"), File(trashOriginalsDir, "$id.enc"))
         move(File(maskedDir, "$id.jpg"), File(trashMaskedDir, "$id.jpg"))
-        val meta = readMeta(id) ?: JSONObject()
         // Tombstone the uuid so a later backup restore won't resurrect this photo here.
         addDeletedUuid(meta.optString("uuid", ""))
         meta.put("deletedAt", deletedAt)
@@ -528,11 +683,21 @@ class SecurePhotoStore(
      * event (file-level import/export, setting change, log management) uses an empty
      * [photoId].
      */
-    fun logAccess(photoId: String, action: String, caption: String, auth: String = "") {
+    fun logAccess(photoId: String, action: String, caption: String, auth: String = "") =
+        logAccessAt(System.currentTimeMillis(), photoId, action, caption, auth)
+
+    /** [logAccess] with the time given rather than taken: for lines that happened earlier. */
+    fun logAccessAt(
+        timestamp: Long,
+        photoId: String,
+        action: String,
+        caption: String,
+        auth: String = ""
+    ) {
         val arr = readAccessLogArray()
         arr.put(
             JSONObject()
-                .put("t", System.currentTimeMillis())
+                .put("t", timestamp)
                 .put("a", action)
                 .put("id", photoId)
                 .put("c", caption)
@@ -694,6 +859,14 @@ class SecurePhotoStore(
         if (enc.exists()) {
             try {
                 return JSONObject(String(decryptBytes(enc.readBytes()), Charsets.UTF_8))
+            } catch (e: VaultClosedException) {
+                // The record is fine; the key is just not in hand. Quarantining it here would
+                // send the caller off to rebuild it from nothing, and a library read while
+                // closed would lose every memo, category and uuid in it. Leave it untouched.
+                throw e
+            } catch (e: SealKeyUnavailableException) {
+                // Same: a seal whose private key did not load is unreadable, not damaged.
+                throw e
             } catch (e: Exception) {
                 // Returning "no metadata" here would be quietly destructive: the callers all
                 // rebuild from an empty object and write it straight back, so a single

@@ -386,4 +386,84 @@ class VaultViewModelTest {
         // 消えたあとに前の暗証番号で開けてしまわないこと。
         assertThat(VaultViewModel(app, dispatcher).stage.value).isEqualTo(VaultViewModel.Stage.SETUP)
     }
+
+    // ---- 封の鍵の組（段2a）: どの入口から開いても、開いた時点でできている ------------------------
+
+    private val sealPub get() = File(app.filesDir, "secure/keys/seal.pub")
+    private val sealPriv get() = File(app.filesDir, "secure/keys/seal.priv")
+
+    @Test
+    fun `初回設定のあと、封の鍵の組ができている`() = runTest(dispatcher) {
+        val model = VaultViewModel(app, dispatcher)
+        model.setUp(pin)
+        advanceUntilIdle()
+
+        assertThat(sealPub.exists()).isTrue()
+        assertThat(sealPriv.exists()).isTrue()
+        assertThat(app.vaultSession.canSeal()).isTrue()
+        // 組が出来た直後から、閉じたまま封をして、開けると読める。
+        val sealed = app.vaultSession.seal("x".toByteArray())
+        assertThat(app.vaultSession.decrypt(sealed)).isEqualTo("x".toByteArray())
+    }
+
+    @Test
+    fun `暗証番号で開いた経路でも、組が無ければ作られ、あれば作り直されない`() = runTest(dispatcher) {
+        VaultViewModel(app, dispatcher).also { it.setUp(pin) }
+        advanceUntilIdle()
+        // この機能より前の端末: 組が無いまま、暗証番号で開く。
+        sealPub.delete()
+        sealPriv.delete()
+
+        val model = VaultViewModel(app, dispatcher)
+        model.unlock(pin)
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.OPEN)
+        assertThat(sealPub.exists()).isTrue()
+        assertThat(sealPriv.exists()).isTrue()
+
+        // 次に開いても同じ組のまま。
+        val pubBefore = sealPub.readBytes()
+        app.vaultSession.close()
+        VaultViewModel(app, dispatcher).also { it.unlock(pin) }
+        advanceUntilIdle()
+        assertThat(sealPub.readBytes()).isEqualTo(pubBefore)
+    }
+
+    @Test
+    fun `回復コードで開いた経路でも、組ができる`() = runTest(dispatcher) {
+        // 回復コードの経路は migrateThenOpen を通らない。そこに置くと漏れるので、
+        // 全経路が通る finishOpening に置いてある——その漏れが無いことを固定する。
+        val first = VaultViewModel(app, dispatcher)
+        first.setUp(pin)
+        advanceUntilIdle()
+        val code = first.newRecoveryCode()
+        first.storeRecoveryCode(code)
+        sealPub.delete()
+        sealPriv.delete()
+        app.vaultSession.close()
+
+        val model = VaultViewModel(app, dispatcher)
+        model.unlockWithRecoveryCode(code.toCharArray())
+        advanceUntilIdle()
+
+        assertThat(model.stage.value).isEqualTo(VaultViewModel.Stage.RECOVERING)
+        assertThat(sealPub.exists()).isTrue()
+        assertThat(sealPriv.exists()).isTrue()
+    }
+
+    @Test
+    fun `作り直したあと、封の鍵の組は残らない`() = runTest(dispatcher) {
+        val model = VaultViewModel(app, dispatcher)
+        model.setUp(pin)
+        advanceUntilIdle()
+        assertThat(sealPub.exists()).isTrue()
+
+        model.resetEverything { }
+        advanceUntilIdle()
+
+        assertThat(sealPub.exists()).isFalse()
+        assertThat(sealPriv.exists()).isFalse()
+        assertThat(app.vaultSession.canSeal()).isFalse()
+    }
 }

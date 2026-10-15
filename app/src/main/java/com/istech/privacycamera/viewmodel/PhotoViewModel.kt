@@ -24,6 +24,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.istech.privacycamera.PrivacyCameraApplication
 import com.istech.privacycamera.Tier
+import com.istech.privacycamera.crypto.SealKeyUnavailableException
+import com.istech.privacycamera.crypto.VaultClosedException
 import com.istech.privacycamera.data.AccessActions
 import com.istech.privacycamera.data.AccessEntry
 import com.istech.privacycamera.data.AppSettings
@@ -150,17 +152,33 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun startUp() {
         viewModelScope.launch {
-            withContext(Dispatchers.IO) { store.migratePlaintextToEncrypted() }
+            // First, before anything reads the log: lines queued while the vault was closed
+            // (photos taken before unlocking) go into the real log at the time they happened.
+            // Failing to fold must not keep the gallery from opening; the lines stay queued
+            // and the next unlock tries again.
+            withContext(Dispatchers.IO) {
+                try {
+                    store.foldPendingLog()
+                } catch (e: Exception) {
+                    // left queued
+                }
+            }
+            launch {
+                withContext(Dispatchers.IO) { store.migratePlaintextToEncrypted() }
+                refresh()
+                reloadCategories()
+            }
             refresh()
             reloadCategories()
+            refreshTrash() // also purges anything past its 30-day window
+            compactAccessLog() // rolls aged-out log entries into monthly archives, if any
         }
-        refresh()
-        reloadCategories()
-        refreshTrash() // also purges anything past its 30-day window
-        compactAccessLog() // rolls aged-out log entries into monthly archives, if any
     }
 
     private fun reloadCategories() {
+        // Like refresh(): with the vault closed there is nothing readable, and a read that
+        // "finds nothing" is indistinguishable from an empty library.
+        if (!application.vaultSession.isOpen) return
         viewModelScope.launch {
             _customCategories.value = withContext(Dispatchers.IO) { store.loadCustomCategories() }
         }
@@ -208,12 +226,23 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refresh() {
+        // Never read the library without the key. This is the guard that matters most here:
+        // list() rebuilds a record it cannot read from nothing and writes it back, so a read
+        // while closed used to be able to cost the whole library its memos, categories and
+        // uuids. The store also refuses to quarantine in that case; this keeps us from asking.
+        if (!application.vaultSession.isOpen) return
         viewModelScope.launch {
-            val (photos, importedCount) = withContext(Dispatchers.IO) {
-                store.list() to store.loadImportedUuids().size
-            }
-            _photos.value = photos
-            _importedMigrationCount.value = importedCount
+            val loaded = withContext(Dispatchers.IO) {
+                try {
+                    store.list() to store.loadImportedUuids().size
+                } catch (e: VaultClosedException) {
+                    null // closed again while reading: leave what is shown as it is
+                } catch (e: SealKeyUnavailableException) {
+                    null // opened, but the sealing key did not load: unreadable, not gone
+                }
+            } ?: return@launch
+            _photos.value = loaded.first
+            _importedMigrationCount.value = loaded.second
         }
     }
 
@@ -227,9 +256,14 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      */
     val saveLimit: Int? = Tier.saveLimit
 
-    /** True when the local store is full for this tier (always false when unlimited). */
+    /**
+     * True when the local store is full for this tier (always false when unlimited).
+     *
+     * Counts the files rather than the loaded list: the list is empty while the vault is closed
+     * (and stale for a moment after a capture), but a cap has to hold either way.
+     */
     fun isAtSaveLimit(): Boolean =
-        saveLimit?.let { _photos.value.size >= it } ?: false
+        saveLimit?.let { store.photoCount() >= it } ?: false
 
     /**
      * Saves a captured JPEG on a background thread (applying [rotationDegrees] so the
@@ -256,6 +290,81 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
             }
             refresh()
             onSaved(item.id)
+        }
+    }
+
+    /** A photo taken without the key, with what the memo screen needs to finish its record. */
+    data class CapturedPhoto(val id: String, val uuid: String, val createdAt: Long)
+
+    /**
+     * Saves a captured JPEG without the vault being open: sealed, listed nowhere until the
+     * next unlock, with an access-log line queued for it.
+     *
+     * Deliberately never touches [refresh] or anything else that reads the library: with no key
+     * there is nothing to read, and reading is what must not happen.
+     *
+     * [onLimitReached] when the tier's cap is already reached (the capture is discarded);
+     * [onFailed] when it could not be written (nothing is left behind).
+     */
+    fun captureWhileLocked(
+        jpegBytes: ByteArray,
+        rotationDegrees: Int,
+        onSaved: (CapturedPhoto) -> Unit,
+        onLimitReached: () -> Unit,
+        onFailed: () -> Unit
+    ) {
+        viewModelScope.launch {
+            val result: Result<CapturedPhoto?> = withContext(Dispatchers.IO) {
+                try {
+                    if (isAtSaveLimit()) {
+                        Result.success(null)
+                    } else {
+                        val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)
+                        val item = store.saveSealed(upright)
+                        // The photo is already safely written; a log line that cannot be queued
+                        // must not turn that into a reported failure (the user would retake it
+                        // and the library would hold both).
+                        try {
+                            store.appendSealedCaptureLog(item.id, item.createdAt)
+                        } catch (e: Exception) {
+                            // photo kept; its capture line is missing
+                        }
+                        Result.success(CapturedPhoto(item.id, item.uuid, item.createdAt))
+                    }
+                } catch (e: Exception) {
+                    Result.failure(e)
+                }
+            }
+            val captured = result.getOrElse {
+                onFailed()
+                return@launch
+            }
+            if (captured == null) onLimitReached() else onSaved(captured)
+        }
+    }
+
+    /**
+     * Writes the memo for a photo taken by [captureWhileLocked], sealed, without reading it.
+     *
+     * [onFailed] when the write did not happen. The photo itself was already written when it was
+     * taken, so what is lost is only the memo; the failure must not take the app down with it.
+     */
+    fun updateMetaWhileLocked(
+        photo: CapturedPhoto,
+        caption: String,
+        category: String,
+        onFailed: () -> Unit = {}
+    ) {
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) {
+                try {
+                    store.rewriteSealedMeta(photo.id, photo.uuid, photo.createdAt, caption, category)
+                    true
+                } catch (e: Exception) {
+                    false
+                }
+            }
+            if (!ok) onFailed()
         }
     }
 
@@ -301,11 +410,19 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun refreshTrash() {
+        if (!application.vaultSession.isOpen) return // see refresh()
         viewModelScope.launch {
-            _trash.value = withContext(Dispatchers.IO) {
-                store.purgeExpiredTrash()
-                store.listTrash()
-            }
+            val trash = withContext(Dispatchers.IO) {
+                try {
+                    store.purgeExpiredTrash()
+                    store.listTrash()
+                } catch (e: VaultClosedException) {
+                    null
+                } catch (e: SealKeyUnavailableException) {
+                    null
+                }
+            } ?: return@launch
+            _trash.value = trash
         }
     }
 

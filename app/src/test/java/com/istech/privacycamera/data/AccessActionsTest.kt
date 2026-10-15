@@ -27,6 +27,7 @@ class AccessActionsTest {
         AccessActions.EXPORT,
         AccessActions.DELETE,
         AccessActions.EDIT,
+        AccessActions.CAPTURE_LOCKED,
         AccessActions.MIGRATE_EXPORT,
         AccessActions.BACKUP_EXPORT,
         AccessActions.MIGRATE_IMPORT,
