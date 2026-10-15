@@ -23,11 +23,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import androidx.fragment.app.FragmentActivity
+import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.istech.privacycamera.ui.AccessLogScreen
 import com.istech.privacycamera.ui.AppLockGate
+import com.istech.privacycamera.ui.CAMERA_ROUTE
 import com.istech.privacycamera.ui.CameraScreen
 import com.istech.privacycamera.ui.EditScreen
 import com.istech.privacycamera.ui.GalleryScreen
@@ -37,6 +40,7 @@ import com.istech.privacycamera.ui.SettingsScreen
 import com.istech.privacycamera.ui.SubmissionOutputFlow
 import com.istech.privacycamera.ui.TrashScreen
 import com.istech.privacycamera.ui.ViewerScreen
+import com.istech.privacycamera.ui.routeNeedsKey
 import com.istech.privacycamera.ui.theme.PrivacyCameraTheme
 
 class MainActivity : FragmentActivity() {
@@ -54,8 +58,20 @@ class MainActivity : FragmentActivity() {
         setContent {
             PrivacyCameraTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {
-                    AppLockGate(activity = this) {
-                        AppNavHost()
+                    // The controller lives here, above the lock layer, because where the user is
+                    // decides what the lock covers: the camera needs no key, the rest does.
+                    val navController = rememberNavController()
+                    val route = navController.currentBackStackEntryAsState().value?.destination?.route
+                    AppLockGate(
+                        activity = this,
+                        needsKey = routeNeedsKey(route),
+                        // Over the lock screen of a protected screen, "back" leaves for the
+                        // camera without unlocking.
+                        onBackWhileLocked = {
+                            navController.popBackStack(Routes.CAMERA, inclusive = false)
+                        }
+                    ) {
+                        AppNavHost(navController)
                     }
                 }
             }
@@ -64,7 +80,7 @@ class MainActivity : FragmentActivity() {
 }
 
 private object Routes {
-    const val CAMERA = "camera"
+    const val CAMERA = CAMERA_ROUTE
     const val GALLERY = "gallery"
     const val VIEWER = "viewer/{id}"
     const val EDIT = "edit/{id}"
@@ -81,8 +97,7 @@ private object Routes {
 }
 
 @androidx.compose.runtime.Composable
-private fun AppNavHost() {
-    val navController = rememberNavController()
+private fun AppNavHost(navController: NavHostController) {
     // Single ViewModel scoped to the Activity so all screens share the same photo list.
     val viewModel: com.istech.privacycamera.viewmodel.PhotoViewModel =
         androidx.lifecycle.viewmodel.compose.viewModel()

@@ -18,6 +18,7 @@ package com.istech.privacycamera.ui
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
 import android.hardware.camera2.CameraCharacteristics
 import android.view.MotionEvent
 import android.widget.Toast
@@ -56,22 +57,28 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.istech.privacycamera.R
 import com.istech.privacycamera.data.PhotoCategories
@@ -129,8 +136,8 @@ private fun CameraContent(
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val categories by viewModel.categories.collectAsState()
     val photos by viewModel.photos.collectAsState()
+    val isOpen by viewModel.isOpen.collectAsState()
     var showLimitDialog by remember { mutableStateOf(false) }
     val previewView = remember { PreviewView(context) }
     val imageCapture = remember {
@@ -143,8 +150,10 @@ private fun CameraContent(
     var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_OFF) }
     var macroOn by remember { mutableStateOf(false) }
     var isSaving by remember { mutableStateOf(false) }
-    // Id of the just-captured photo awaiting an optional memo.
-    var pendingMemoId by remember { mutableStateOf<String?>(null) }
+    // The just-captured photo awaiting an optional memo, and a small copy of it for the memo
+    // screen. Both routes (key held or not) end in this same shape. The copy lives in memory
+    // only and goes with the dialog.
+    var pendingMemo by remember { mutableStateOf<PendingMemo?>(null) }
 
     // Keep the flash mode in sync with the capture use case.
     LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
@@ -230,11 +239,18 @@ private fun CameraContent(
                 .padding(top = 96.dp, start = 16.dp, end = 16.dp)
         )
 
-        // Lite-only capacity counter (Pro is unlimited so saveLimit is null).
-        viewModel.saveLimit?.let { limit ->
-            val full = photos.size >= limit
+        // Lite-only capacity counter (Pro is unlimited so saveLimit is null). Drawn only while
+        // the vault is open: how many photos are stored is something the lock keeps back, and
+        // with it closed the screen may say only that the limit is reached (see the dialog).
+        val counterLimit = viewModel.saveLimit
+        if (isOpen && counterLimit != null) {
+            // Counted the same way the limit check counts (files, not the loaded list), so the
+            // number shown and the "上限" that stops a capture can never disagree.
+            val stored = remember(photos) { viewModel.storedCount() }
+            val limit = counterLimit
+            val full = stored >= limit
             Text(
-                text = "保存 ${photos.size} / $limit" + if (full) "（上限）" else "",
+                text = "保存 $stored / $limit" + if (full) "（上限）" else "",
                 color = if (full) MaterialTheme.colorScheme.error else Color.White,
                 style = MaterialTheme.typography.labelMedium,
                 textAlign = TextAlign.Center,
@@ -254,7 +270,7 @@ private fun CameraContent(
         ) {
             // Shutter is disabled while saving AND while a memo dialog is pending,
             // which prevents an accidental second capture creating a stray photo.
-            val shutterEnabled = !isSaving && pendingMemoId == null
+            val shutterEnabled = !isSaving && pendingMemo == null
             ShutterButton(
                 enabled = shutterEnabled,
                 modifier = Modifier.align(Alignment.Center)
@@ -273,18 +289,34 @@ private fun CameraContent(
                             val rotation = image.imageInfo.rotationDegrees
                             val bytes = image.toJpegBytes()
                             image.close()
-                            viewModel.onCaptured(
-                                bytes,
-                                rotation,
-                                onSaved = { id ->
+                            val onSaved: (PhotoViewModel.CapturedPhoto, Bitmap?) -> Unit =
+                                { photo, preview ->
                                     isSaving = false
-                                    pendingMemoId = id
-                                },
-                                onLimitReached = {
-                                    isSaving = false
-                                    showLimitDialog = true
+                                    pendingMemo = PendingMemo(photo, preview?.asImageBitmap())
                                 }
-                            )
+                            val onLimitReached: () -> Unit = {
+                                isSaving = false
+                                showLimitDialog = true
+                            }
+                            // Chosen now, at the moment the picture is in hand: with a key it is
+                            // the ordinary save, without one it is sealed and listed nowhere
+                            // until the next unlock.
+                            if (viewModel.isOpen.value) {
+                                viewModel.onCaptured(bytes, rotation, onSaved, onLimitReached)
+                            } else {
+                                viewModel.captureWhileLocked(
+                                    bytes,
+                                    rotation,
+                                    onSaved = onSaved,
+                                    onLimitReached = onLimitReached,
+                                    onFailed = {
+                                        isSaving = false
+                                        Toast.makeText(
+                                            context, "保存できませんでした", Toast.LENGTH_SHORT
+                                        ).show()
+                                    }
+                                )
+                            }
                         }
 
                         override fun onError(exception: ImageCaptureException) {
@@ -311,20 +343,11 @@ private fun CameraContent(
         }
     }
 
-    pendingMemoId?.let { id ->
-        MemoDialog(
-            initialCaption = "",
-            initialCategory = PhotoCategories.UNCLASSIFIED,
-            categories = categories,
-            onAddCategory = { viewModel.addCategory(it) },
-            title = "メモを追加",
-            onDismiss = { pendingMemoId = null },
-            onSave = { caption, category ->
-                viewModel.updateMeta(id, caption, category)
-                pendingMemoId = null
-            }
-        )
-    }
+    CapturedMemoDialogHost(
+        memo = pendingMemo,
+        onClose = { pendingMemo = null },
+        viewModel = viewModel
+    )
 
     if (showLimitDialog) {
         SaveLimitDialog(
@@ -334,6 +357,96 @@ private fun CameraContent(
                 onOpenGallery()
             },
             onDismiss = { showLimitDialog = false }
+        )
+    }
+}
+
+/** A photo waiting for its memo, with a memory-only copy of it for the memo screen. */
+internal class PendingMemo(
+    val photo: PhotoViewModel.CapturedPhoto,
+    val preview: ImageBitmap?
+)
+
+/**
+ * The memo screen shown right after a capture, for [memo] (nothing is shown while it is null).
+ *
+ * Split out of [CameraContent] so the show/hide of this one screen can be exercised without the
+ * camera (CameraX does not run on the JVM). [onClose] is how it asks to be taken down — skip, save,
+ * or (see below) the app leaving the foreground.
+ */
+@Composable
+internal fun CapturedMemoDialogHost(
+    memo: PendingMemo?,
+    onClose: () -> Unit,
+    viewModel: PhotoViewModel
+) {
+    val context = LocalContext.current
+    val isOpen by viewModel.isOpen.collectAsState()
+    val categories by viewModel.categories.collectAsState()
+    // Categories typed in while the vault was closed: they are only attached to this photo (the
+    // list of the user's own categories is written under the key, which is not in hand), but the
+    // dialog still has to show what was just chosen. Starts empty for every new photo.
+    var addedWhileLocked by remember(memo) { mutableStateOf<List<String>>(emptyList()) }
+
+    // Leaving the foreground ends "just now": the photo and a half-typed memo are not kept on
+    // screen for whoever picks the phone up next. Closed like "スキップ" — nothing is saved (the
+    // photo was written when it was taken; the memo can be added later inside the protected
+    // folder). The same idea as the unconfirmed recovery code, which is dropped when the vault
+    // leaves OPEN; this screen can be up with the vault closed, so the cue is the app going to the
+    // background rather than the stage.
+    //
+    // ON_STOP and not ON_PAUSE: our own biometric prompt pauses the activity too, and the memo
+    // must survive that.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val memoNow by rememberUpdatedState(memo)
+    val onCloseNow by rememberUpdatedState(onClose)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && memoNow != null) onCloseNow()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    memo?.let {
+        // With the vault closed, `categories` may still hold the user's own names from the last
+        // time it was open, so it is not used: only the built-in ones are offered.
+        val lockedCategories = PhotoCategories.PREDEFINED + PhotoCategories.UNCLASSIFIED
+        MemoDialog(
+            initialCaption = "",
+            initialCategory = PhotoCategories.UNCLASSIFIED,
+            categories = if (isOpen) categories else lockedCategories + addedWhileLocked,
+            onAddCategory = { name ->
+                if (viewModel.isOpen.value) {
+                    viewModel.addCategory(name)
+                } else if (name !in lockedCategories && name !in addedWhileLocked) {
+                    addedWhileLocked = addedWhileLocked + name
+                }
+            },
+            title = "メモを追加",
+            photo = it.preview,
+            onDismiss = onClose,
+            onSave = { caption, category ->
+                // The route is chosen by whether the key is held NOW, not by how the photo was
+                // taken: a photo taken with the key can reach this button after the key has been
+                // let go (the app left and came back), and the ordinary update would then read a
+                // record it has no key for.
+                if (viewModel.isOpen.value) {
+                    viewModel.updateMeta(it.photo.id, caption, category)
+                } else {
+                    viewModel.updateMetaWhileLocked(
+                        it.photo,
+                        caption,
+                        category,
+                        onFailed = {
+                            Toast.makeText(
+                                context, "メモを保存できませんでした", Toast.LENGTH_SHORT
+                            ).show()
+                        }
+                    )
+                }
+                onClose()
+            }
         )
     }
 }

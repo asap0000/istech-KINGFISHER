@@ -15,12 +15,14 @@
  */
 package com.istech.privacycamera.ui
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -41,6 +43,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.unit.dp
 import com.istech.privacycamera.data.CategoryCatalog
 
@@ -57,7 +62,13 @@ fun MemoDialog(
     onAddCategory: (String) -> Unit,
     onDismiss: () -> Unit,
     onSave: (caption: String, category: String) -> Unit,
-    title: String = "メモを追加"
+    title: String = "メモを追加",
+    /**
+     * The photo just taken, shown under the title so the memo is written about something the
+     * user can see. Null (the default) leaves the dialog as it is for the viewer's memo editing,
+     * where the photo is already on screen behind it.
+     */
+    photo: ImageBitmap? = null
 ) {
     var caption by remember { mutableStateOf(initialCaption) }
     var category by remember { mutableStateOf(initialCategory) }
@@ -91,6 +102,19 @@ fun MemoDialog(
         title = { Text(title) },
         text = {
             Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                if (photo != null) {
+                    // Full width, at most four tenths of the screen tall, aspect ratio kept.
+                    val maxHeight = (LocalConfiguration.current.screenHeightDp * 0.4f).dp
+                    Image(
+                        bitmap = photo,
+                        contentDescription = "いま撮った写真",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = maxHeight)
+                            .padding(bottom = 16.dp)
+                    )
+                }
                 OutlinedTextField(
                     value = caption,
                     onValueChange = { caption = it },

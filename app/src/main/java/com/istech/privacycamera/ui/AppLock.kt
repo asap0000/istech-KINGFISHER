@@ -16,6 +16,7 @@
 package com.istech.privacycamera.ui
 
 import android.os.SystemClock
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -69,7 +70,7 @@ private enum class LockState { LOCKED, AUTHENTICATING, UNLOCKED }
  * enrolled, then the passphrase, then the recovery code, and only then the irreversible
  * reset — never more than one offered on the same screen.
  */
-private enum class LockStep {
+internal enum class LockStep {
     Fingerprint,
     ShortcutUnavailable,
     Passphrase,
@@ -86,14 +87,62 @@ private enum class LockStep {
 /** Auto-lock after this much inactivity (no touch). Adjust to taste. */
 private const val AUTO_LOCK_MS = 120_000L
 
+/** The navigation route of the camera, the one screen that needs no key to be usable. */
+internal const val CAMERA_ROUTE = "camera"
+
+/**
+ * Whether the screen at [route] is behind the key. Everything but the camera is: the settings,
+ * the access log, the trash, export and print all live inside the protected folder.
+ *
+ * A route that is not known yet (the very first frame, before the graph is set) counts as
+ * needing the key, so the unknown case errs towards covering rather than showing.
+ */
+internal fun routeNeedsKey(route: String?): Boolean = route != CAMERA_ROUTE
+
+/**
+ * Whether the lock layer must cover the app. One rule, used for both the opaque cover and the
+ * accessibility seal: a screen that is drawn over but still readable by a screen reader (or the
+ * reverse) is the mistake this exists to rule out.
+ *
+ *  - an unconfirmed recovery code always covers;
+ *  - the first setup, and every in-between stage (migrating, recovering), cover as they always did;
+ *  - a locked vault covers the protected folder and everything beyond it ([needsKey]), and also
+ *    the camera while no sealing pair exists yet ([sealReady] false): the one launch after an
+ *    update has nothing to seal with, so that time the camera waits for an unlock too.
+ */
+internal fun isGateCovered(
+    stage: VaultViewModel.Stage,
+    needsKey: Boolean,
+    sealReady: Boolean,
+    hasPendingCode: Boolean
+): Boolean =
+    hasPendingCode ||
+        stage == VaultViewModel.Stage.SETUP ||
+        (stage != VaultViewModel.Stage.OPEN && stage != VaultViewModel.Stage.LOCKED) ||
+        (stage == VaultViewModel.Stage.LOCKED && (needsKey || !sealReady))
+
+/** The door a fresh arrival at the lock screen starts from: fingerprint if enrolled, else passphrase. */
+internal fun firstLockStep(hasShortcut: Boolean): LockStep =
+    if (hasShortcut) LockStep.Fingerprint else LockStep.Passphrase
+
 /**
  * Wraps the whole app behind device authentication.
  *
  * Locks: on launch, when sent to the background (ON_STOP), and after
  * [AUTO_LOCK_MS] of no touch interaction while in the foreground.
+ *
+ * What the lock covers depends on where the user is ([needsKey], from the current route): the
+ * camera is usable with the vault closed, everything past the protected-folder button is not.
+ * [onBackWhileLocked] is what the device's back button does over the lock screen of a protected
+ * screen: leave for the camera without unlocking.
  */
 @Composable
-fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
+fun AppLockGate(
+    activity: FragmentActivity,
+    needsKey: Boolean,
+    onBackWhileLocked: () -> Unit,
+    content: @Composable () -> Unit
+) {
     // The activity's model, not a nearest-owner one. This call site happens to sit outside the
     // NavHost and would resolve correctly either way, but it goes through the same helper as
     // every other screen so there is one rule rather than one rule and an exception.
@@ -105,18 +154,25 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     val lockedOutFor by vaultModel.lockedOutFor.collectAsState()
     val hasRecoveryCode by vaultModel.hasRecoveryCode.collectAsState()
     val shortcutInvalidated by vaultModel.shortcutInvalidated.collectAsState()
+    val sealReady by vaultModel.sealReady.collectAsState()
     // Which door LOCKED is currently showing. Local rather than a Stage of its own, because
     // nothing has happened yet — it is still the same locked vault, seen from a different
     // door, and moving between doors must cost nothing.
-    var lockStep by remember {
-        mutableStateOf(if (vaultModel.hasShortcut) LockStep.Fingerprint else LockStep.Passphrase)
-    }
+    var lockStep by remember { mutableStateOf(firstLockStep(vaultModel.hasShortcut)) }
     // A code generated but not yet stored, and whether "あとで" is on offer. Held here until
     // the user has copied a group back: an unconfirmed code is characters on a screen, and
     // storing it early would retire the paper the user still has.
     var pendingCode by remember { mutableStateOf<String?>(null) }
     var pendingCodeSkippable by remember { mutableStateOf(true) }
     var lastInteraction by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
+
+    val covered = isGateCovered(
+        stage = stage,
+        needsKey = needsKey,
+        sealReady = sealReady,
+        hasPendingCode = pendingCode != null
+    )
+    val onBackWhileLockedNow by rememberUpdatedState(onBackWhileLocked)
 
     val lockState = when (stage) {
         VaultViewModel.Stage.OPEN -> LockState.UNLOCKED
@@ -129,12 +185,18 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     // the one secret this app never shows twice over a lock screen the user just triggered.
     LaunchedEffect(stage) {
         if (stage != VaultViewModel.Stage.OPEN) pendingCode = null
-        // Every fresh arrival at LOCKED starts from the same door: fingerprint when one is
-        // enrolled, passphrase otherwise. Without this, backing out of the app mid-recovery
-        // and coming back would resume on whichever door was last shown instead of the one
-        // the policy says to lead with.
-        if (stage == VaultViewModel.Stage.LOCKED) {
-            lockStep = if (vaultModel.hasShortcut) LockStep.Fingerprint else LockStep.Passphrase
+    }
+
+    // Every fresh arrival at the lock screen starts from the same door: fingerprint when one is
+    // enrolled, passphrase otherwise. Without this, backing out of the app mid-recovery and
+    // coming back would resume on whichever door was last shown instead of the one the policy
+    // says to lead with. Keyed on [covered] as well as the stage: the lock screen now comes and
+    // goes with the route while the stage stays LOCKED, so someone who got as far as the
+    // recovery-code door, went back to the camera, and opens the protected folder again must
+    // start from the front door, not from where they left off.
+    LaunchedEffect(stage, covered) {
+        if (stage == VaultViewModel.Stage.LOCKED && covered) {
+            lockStep = firstLockStep(vaultModel.hasShortcut)
         }
     }
 
@@ -247,7 +309,7 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
     // composed — and merely covered — lets those flows complete after unlocking.
     androidx.compose.foundation.layout.Box(modifier = Modifier.fillMaxSize()) {
         SealedWhileCovered(
-            covered = stage != VaultViewModel.Stage.OPEN || pendingCode != null,
+            covered = covered,
             // Observe every touch (Initial pass, without consuming) to reset the timer.
             modifier = Modifier
                 .fillMaxSize()
@@ -261,6 +323,17 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 }
         ) {
             content()
+        }
+
+        // Registered after the content on purpose: of the enabled back callbacks the one added
+        // last is asked first, and this must outrank the navigation's own "pop one screen" -
+        // from deep inside the protected folder, one press goes all the way back to the camera.
+        // Only over the lock screen of a protected screen, so the camera's own lock screen (no
+        // sealing pair yet), setup, migration and recovery keep the system's behaviour. Every
+        // door (fingerprint, passphrase, recovery code) is the same here; the reset confirmation
+        // is a dialog and takes the press itself before it gets this far.
+        BackHandler(enabled = stage == VaultViewModel.Stage.LOCKED && needsKey) {
+            onBackWhileLockedNow()
         }
 
         // Opaque, full-screen cover so the protected content is never visible (and stays
@@ -283,7 +356,7 @@ fun AppLockGate(activity: FragmentActivity, content: @Composable () -> Unit) {
                 }
             )
 
-            VaultViewModel.Stage.LOCKED -> {
+            VaultViewModel.Stage.LOCKED -> if (covered) {
                 when (lockStep) {
                     LockStep.Fingerprint -> VaultFingerprintScreen(
                         onUseShortcut = { useShortcut() },

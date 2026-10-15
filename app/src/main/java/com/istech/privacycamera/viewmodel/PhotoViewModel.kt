@@ -125,6 +125,14 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
             initialValue = PhotoCategories.PREDEFINED + PhotoCategories.UNCLASSIFIED
         )
 
+    /**
+     * Whether a key is held right now.
+     *
+     * The camera is usable either way; what differs is the route a capture takes and what the
+     * screen is allowed to say (a count of stored photos is only offered while open).
+     */
+    val isOpen: StateFlow<Boolean> = application.vaultSession.isOpenFlow
+
     /** How many photos have ever been imported via the Lite-migration path (cap basis). */
     private val _importedMigrationCount = MutableStateFlow(0)
     val importedMigrationCount: StateFlow<Int> = _importedMigrationCount.asStateFlow()
@@ -265,18 +273,23 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     fun isAtSaveLimit(): Boolean =
         saveLimit?.let { store.photoCount() >= it } ?: false
 
+    /** How many photos are stored, counted the way [isAtSaveLimit] counts them. */
+    fun storedCount(): Int = store.photoCount()
+
     /**
      * Saves a captured JPEG on a background thread (applying [rotationDegrees] so the
-     * stored image is upright), refreshes the gallery, then reports the new photo id so
-     * the UI can prompt for a memo.
+     * stored image is upright), refreshes the gallery, then reports the new photo (with a small
+     * upright preview of it for the memo screen) so the UI can prompt for a memo.
      *
      * When the tier's storage cap is already reached the capture is discarded and
      * [onLimitReached] is invoked instead — the user must delete to make room.
+     *
+     * The preview is memory only and may be null (it never decides whether the save worked).
      */
     fun onCaptured(
         jpegBytes: ByteArray,
         rotationDegrees: Int,
-        onSaved: (String) -> Unit = {},
+        onSaved: (CapturedPhoto, Bitmap?) -> Unit = { _, _ -> },
         onLimitReached: () -> Unit = {}
     ) {
         if (isAtSaveLimit()) {
@@ -284,12 +297,13 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            val item = withContext(Dispatchers.IO) {
+            val saved = withContext(Dispatchers.IO) {
                 val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)
-                store.save(upright)
+                val item = store.save(upright)
+                CapturedPhoto(item.id, item.uuid, item.createdAt) to previewOf(upright)
             }
             refresh()
-            onSaved(item.id)
+            onSaved(saved.first, saved.second)
         }
     }
 
@@ -301,7 +315,8 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * next unlock, with an access-log line queued for it.
      *
      * Deliberately never touches [refresh] or anything else that reads the library: with no key
-     * there is nothing to read, and reading is what must not happen.
+     * there is nothing to read, and reading is what must not happen. The preview handed to
+     * [onSaved] is made from the bytes just captured, never from anything stored.
      *
      * [onLimitReached] when the tier's cap is already reached (the capture is discarded);
      * [onFailed] when it could not be written (nothing is left behind).
@@ -309,12 +324,12 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     fun captureWhileLocked(
         jpegBytes: ByteArray,
         rotationDegrees: Int,
-        onSaved: (CapturedPhoto) -> Unit,
+        onSaved: (CapturedPhoto, Bitmap?) -> Unit,
         onLimitReached: () -> Unit,
         onFailed: () -> Unit
     ) {
         viewModelScope.launch {
-            val result: Result<CapturedPhoto?> = withContext(Dispatchers.IO) {
+            val result: Result<Pair<CapturedPhoto, Bitmap?>?> = withContext(Dispatchers.IO) {
                 try {
                     if (isAtSaveLimit()) {
                         Result.success(null)
@@ -329,7 +344,9 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                         } catch (e: Exception) {
                             // photo kept; its capture line is missing
                         }
-                        Result.success(CapturedPhoto(item.id, item.uuid, item.createdAt))
+                        Result.success(
+                            CapturedPhoto(item.id, item.uuid, item.createdAt) to previewOf(upright)
+                        )
                     }
                 } catch (e: Exception) {
                     Result.failure(e)
@@ -339,7 +356,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                 onFailed()
                 return@launch
             }
-            if (captured == null) onLimitReached() else onSaved(captured)
+            if (captured == null) onLimitReached() else onSaved(captured.first, captured.second)
         }
     }
 
@@ -805,5 +822,58 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     /** Records the terminal outcome of a print job, as a separate entry from OUTPUT_PRINT. */
     suspend fun logOutputResult(photoId: String, detail: String) {
         withContext(Dispatchers.IO) { store.logAccess(photoId, AccessActions.OUTPUT_RESULT, detail) }
+    }
+
+    companion object {
+        /** Longest edge of the memo screen's preview, in pixels. */
+        const val PREVIEW_MAX_EDGE = 1024
+
+        /**
+         * A small copy of an already-upright JPEG for the memo screen, or null if it cannot be
+         * made. Held in memory only; nothing here writes it anywhere.
+         *
+         * Failing to make it must never fail the capture (the photo is already safe), so every
+         * problem — including running out of memory on a very large frame — is a null.
+         */
+        internal fun previewOf(upright: ByteArray, maxEdge: Int = PREVIEW_MAX_EDGE): Bitmap? =
+            try {
+                val bounds = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                android.graphics.BitmapFactory.decodeByteArray(upright, 0, upright.size, bounds)
+                val longEdge = maxOf(bounds.outWidth, bounds.outHeight)
+                if (longEdge <= 0) {
+                    null
+                } else {
+                    // Decode at the largest power-of-two reduction that still leaves at least
+                    // maxEdge, then scale the last step exactly.
+                    var sample = 1
+                    while (longEdge / (sample * 2) >= maxEdge) sample *= 2
+                    val decoded = android.graphics.BitmapFactory.decodeByteArray(
+                        upright, 0, upright.size,
+                        android.graphics.BitmapFactory.Options().apply { inSampleSize = sample }
+                    )
+                    if (decoded == null) {
+                        null
+                    } else {
+                        val edge = maxOf(decoded.width, decoded.height)
+                        if (edge <= maxEdge) {
+                            decoded
+                        } else {
+                            val scale = maxEdge.toFloat() / edge
+                            val scaled = Bitmap.createScaledBitmap(
+                                decoded,
+                                maxOf(1, Math.round(decoded.width * scale)),
+                                maxOf(1, Math.round(decoded.height * scale)),
+                                true
+                            )
+                            if (scaled !== decoded) decoded.recycle()
+                            scaled
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                null
+            } catch (e: OutOfMemoryError) {
+                null
+            }
     }
 }

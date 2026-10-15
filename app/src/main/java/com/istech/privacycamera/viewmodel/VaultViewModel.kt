@@ -106,6 +106,23 @@ class VaultViewModel @JvmOverloads constructor(
 
     val hasShortcut: Boolean get() = vault.hasBiometricShortcut()
 
+    private val _sealReady = MutableStateFlow(session.canSeal())
+
+    /**
+     * True when a photo can be taken and written with no key in hand, i.e. the sealing pair
+     * exists. The camera is only left uncovered while this holds (the first launch after an
+     * update has no pair yet, so that one time the camera too waits behind the lock screen).
+     *
+     * Read again from the session at the two moments it can change rather than derived from
+     * [stage]: opening can set a pair aside the instant the key is in hand (an unreadable
+     * private half), and the pair is only created a little later, off the main thread.
+     */
+    val sealReady: StateFlow<Boolean> = _sealReady.asStateFlow()
+
+    private fun refreshSealReady() {
+        _sealReady.value = session.canSeal()
+    }
+
     /**
      * True once, after the fingerprint shortcut has died on its own — screen lock changed, a
      * new fingerprint enrolled — rather than the user switching it off in settings.
@@ -168,6 +185,7 @@ class VaultViewModel @JvmOverloads constructor(
             val ok = withContext(io) {
                 try {
                     session.open(vault.initialize(passphrase))
+                    refreshSealReady()
                     true
                 } catch (e: Exception) {
                     false
@@ -218,6 +236,7 @@ class VaultViewModel @JvmOverloads constructor(
             _lastAttemptFailed.value = false
             _lockedOutFor.value = 0
             session.open(key)
+            refreshSealReady()
             migrateThenOpen()
         }
     }
@@ -236,6 +255,7 @@ class VaultViewModel @JvmOverloads constructor(
         val key = vault.completeUnlock(cipher) ?: return false
         openingInProgress = true
         session.open(key)
+        refreshSealReady()
         viewModelScope.launch { migrateThenOpen() }
         return true
     }
@@ -306,6 +326,7 @@ class VaultViewModel @JvmOverloads constructor(
             _recoveryFailed.value = false
             _lockedOutFor.value = 0
             session.open(key)
+            refreshSealReady()
             finishOpening(Stage.RECOVERING)
         }
     }
@@ -393,6 +414,7 @@ class VaultViewModel @JvmOverloads constructor(
                 session.clearMigrationMark()
             }
             _hasRecoveryCode.value = false
+            _sealReady.value = false
             _stage.value = Stage.SETUP
             onDone()
         }
@@ -446,7 +468,12 @@ class VaultViewModel @JvmOverloads constructor(
         // which does not pass through migrateThenOpen — so this is the one place that cannot
         // miss a route. Generating the pair is slow (RSA), hence IO. Idempotent, and a no-op if
         // the vault closes before it gets to write.
-        viewModelScope.launch(io) { session.ensureSealKeys() }
+        viewModelScope.launch(io) {
+            session.ensureSealKeys()
+            // Opening can have set an unreadable pair aside (canSeal went false) and this is
+            // what makes a fresh one; either way the screen needs the answer as it now stands.
+            refreshSealReady()
+        }
         if (lockRequestedWhileOpening) {
             lockRequestedWhileOpening = false
             session.close()
