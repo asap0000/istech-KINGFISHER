@@ -120,6 +120,8 @@ jobs:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
+          # 下書きで止める（2026-10-24 オーナー: 販売サイトへの掲載の前に公開しない。公開は人が GitHub で押す）
+          draft: true
           body: |
             **SHA-256 (Lite APK)**: `${{ steps.stage.outputs.sha256_lite }}`
             **SHA-256 (Pro APK)**: `${{ steps.stage.outputs.sha256_pro }}`
