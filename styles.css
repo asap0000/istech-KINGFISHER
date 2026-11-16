@@ -1,0 +1,207 @@
+:root {
+  color-scheme: light;
+  --paper: #f7f5ef;
+  --ink: #182f31;
+  --secondary: #415c5b;
+  --rule: #cbd2c9;
+  --accent: #213959;
+  --edge: clamp(1.25rem, 5vw, 5rem);
+  font-family: Inter, "Hiragino Kaku Gothic ProN", "Yu Gothic", Meiryo, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+body { margin: 0; line-height: 1.8; }
+h1, h2, h3, p, figure { margin: 0; }
+a { color: inherit; text-underline-offset: 0.23em; }
+a:hover { text-decoration-thickness: 0.12em; }
+:focus-visible { outline: 3px solid #193d6c; outline-offset: 4px; }
+[id] { scroll-margin-top: 1.25rem; }
+.wrap { width: min(100% - 2 * var(--edge), 80rem); margin-inline: auto; }
+
+.skip-link {
+  position: absolute;
+  inset-block-start: 0.5rem;
+  inset-inline-start: 1rem;
+  z-index: 1;
+  transform: translateY(-200%);
+  background: white;
+  padding: 0.5rem 1rem;
+}
+.skip-link:focus { transform: none; }
+.site-header { border-bottom: 1px solid var(--rule); }
+.header-inner {
+  min-height: 4.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem 2rem;
+}
+.brand {
+  display: block;
+  flex-shrink: 0;
+  inline-size: clamp(8rem, 12vw, 9.375rem);
+}
+.brand img { display: block; inline-size: 100%; block-size: auto; }
+nav { display: flex; gap: 0.25rem clamp(0.75rem, 2.8vw, 2rem); flex-wrap: wrap; }
+nav a { padding-block: 0.5rem; font-size: 0.875rem; font-weight: 700; text-decoration: none; }
+nav a:hover { text-decoration: underline; }
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 0.87fr) minmax(0, 1.13fr);
+  align-items: center;
+  gap: clamp(1.75rem, 5vw, 5rem);
+  padding-block: clamp(2.5rem, 6vw, 6rem);
+}
+.label {
+  font-size: 0.8125rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent);
+}
+.hero h1 {
+  font-size: clamp(2.375rem, 4.1vw, 4.25rem);
+  line-height: 1.24;
+  letter-spacing: -0.045em;
+  font-weight: 800;
+  margin-block: 0.25em 0.42em;
+}
+.hero h1 span { display: block; }
+.hero-intro { max-width: 31em; color: var(--secondary); }
+.jump-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 1.25rem;
+  min-height: 2.75rem;
+  padding: 0.3rem 1rem;
+  margin-top: 1.25rem;
+  background: var(--accent);
+  border-radius: 0.25rem;
+  color: white;
+  font-weight: 700;
+  font-size: 0.875rem;
+  text-decoration: none;
+}
+.jump-link:hover { background: #172c47; }
+.film { min-width: 0; }
+.film video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  background: #e7e8e3;
+  border-radius: 0.5rem;
+}
+.film figcaption {
+  margin-top: 0.7rem;
+  padding-block: 0.35rem 0.7rem;
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.35rem 1rem;
+  font-size: 0.875rem;
+}
+.film figcaption span#film-duration { display: block; color: var(--secondary); font-size: 0.8125rem; }
+.film a { color: var(--accent); white-space: nowrap; }
+
+.policy { background: #18283c; color: #faf9f2; }
+.policy :focus-visible { outline-color: #b9cbe3; }
+.policy-inner {
+  display: grid;
+  grid-template-columns: minmax(0, 0.87fr) minmax(0, 1.13fr);
+  align-items: center;
+  gap: clamp(1.25rem, 5vw, 5rem);
+  padding-block: clamp(2.25rem, 5vw, 4rem);
+}
+.policy .label { color: #afc3dd; }
+.policy h2 { font-size: clamp(2.25rem, 4vw, 3.75rem); letter-spacing: -0.055em; line-height: 1.03; margin-top: 0.28em; }
+.policy h3 { font-size: clamp(1.125rem, 2vw, 1.45rem); margin-bottom: 0.45rem; }
+.policy-copy p { color: #dbe1e8; max-width: 42em; }
+.policy-copy p + p { margin-top: 0.85rem; }
+
+.classes { padding-block: clamp(2.75rem, 6vw, 5.5rem); }
+.classes h2 { font-size: clamp(1.8rem, 4vw, 3rem); letter-spacing: -0.05em; line-height: 1.3; }
+.classes-intro p { max-width: 41em; color: var(--secondary); margin-top: 0.75rem; }
+.class-list { list-style: none; padding: 0; margin: 1.75rem 0 0; border-top: 1px solid var(--rule); }
+.class-row {
+  --class-color: #527c70;
+  display: grid;
+  grid-template-columns: clamp(7.5rem, 13vw, 10rem) minmax(8rem, 0.42fr) minmax(0, 1fr);
+  align-items: center;
+  column-gap: clamp(1rem, 3vw, 3rem);
+  padding-block: 1.4rem;
+  border-bottom: 1px solid var(--rule);
+}
+.class-portrait figcaption {
+  margin-top: 0.3rem;
+  color: var(--secondary);
+  font-size: 0.875rem;
+  font-weight: 700;
+}
+.portrait-image {
+  /* The 1280 × 720 CM poster supplies a 184 × 190 crop for each class. */
+  aspect-ratio: 184 / 190;
+  border-radius: 0.4rem;
+  background-image: url("assets/istech-class-intro-poster.jpg");
+  background-repeat: no-repeat;
+  background-size: calc(100% * 1280 / 184) auto;
+  background-position:
+    calc(100% * var(--portrait-x) / (1280 - 184))
+    calc(100% * var(--portrait-y) / (720 - 190));
+  box-shadow: inset 0 0 0 1px var(--rule);
+}
+.corundum { --portrait-x: 44; --portrait-y: 100; }
+.topaz { --portrait-x: 300; --portrait-y: 91; }
+.quartz { --portrait-x: 558; --portrait-y: 134; }
+.iron { --portrait-x: 809; --portrait-y: 138; }
+.fluorite { --portrait-x: 1059; --portrait-y: 168; }
+.class-name { padding-inline-start: 0.95rem; border-inline-start: 4px solid var(--class-color); }
+.class-name span { color: var(--secondary); font-size: 0.8125rem; font-weight: 700; letter-spacing: 0.06em; }
+.class-name h3 { font-size: clamp(1.2rem, 2.3vw, 1.55rem); line-height: 1.35; }
+.class-description { max-width: 43em; color: var(--secondary); }
+.class-summary { font-weight: 700; color: var(--ink); margin-bottom: 0.25rem; }
+.corundum .class-name { border-image: linear-gradient(#a94259 50%, #3b6295 50%) 1; }
+.topaz { --class-color: #9a6c21; }
+.quartz { --class-color: #8376ad; }
+.iron { --class-color: #616971; }
+.fluorite { --class-color: #4b8b74; }
+
+.product-notes { background: #e8ebf0; border-top: 1px solid var(--rule); }
+.product-notes-inner {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: clamp(1.5rem, 5vw, 4rem);
+  padding-block: clamp(2rem, 4vw, 3.5rem);
+}
+.product-notes h2 { font-size: clamp(1.15rem, 2.2vw, 1.55rem); line-height: 1.45; }
+.product-notes p { color: var(--secondary); margin-top: 0.6rem; }
+
+.site-footer { border-top: 1px solid var(--rule); }
+.footer-inner {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem 3rem;
+  padding-block: 1.7rem;
+}
+.footer-inner p { color: var(--secondary); font-size: 0.8125rem; }
+.footer-inner .brand { inline-size: 7.25rem; }
+.contact h2 { font-size: 0.9375rem; margin-bottom: 0.2rem; }
+
+@media (max-width: 47rem) {
+  .hero, .policy-inner, .product-notes-inner { grid-template-columns: minmax(0, 1fr); }
+  .hero h1 { font-size: clamp(2.25rem, 8vw, 3.6rem); }
+  .hero h1 span:nth-child(2), .hero h1 span:nth-child(3) { display: inline; }
+  .hero h1 span { overflow-wrap: anywhere; }
+  .class-row { grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0.65rem 1rem; }
+  .class-description { grid-column: 1 / -1; }
+}
+
+@media (max-width: 26rem) {
+  .header-inner { align-items: flex-start; flex-direction: column; padding-block: 1rem 0.5rem; }
+}

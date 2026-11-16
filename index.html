@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="istechの開発方針と、アプリの通信範囲を示す5つのクラスをご紹介します。">
+  <meta name="theme-color" content="#f7f5ef">
+  <title>開発方針と5つのクラス｜istech</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">本文へ</a>
+  <header class="site-header" id="top">
+    <div class="wrap header-inner">
+      <a class="brand" href="#top" aria-label="istech ページ先頭">
+        <img src="assets/istech-logo.png" alt="" width="909" height="388">
+      </a>
+      <nav aria-label="ページ内メニュー">
+        <a href="#policy">開発方針</a>
+        <a href="#classes">5つのクラス</a>
+        <a href="#film">紹介映像</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero wrap" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="label">istech（イズテック）について</p>
+        <h1 id="hero-title"><span>必要な機能を、</span><span>必要なつながり</span><span>だけで。</span></h1>
+        <p class="hero-intro">あったらいいなを、現実に。<br>発見する喜びを形にしたい。<br>そんなソフトウェアを開発・提供します。</p>
+        <a class="jump-link" href="#classes">5つのクラスを見る <span aria-hidden="true">↓</span></a>
+      </div>
+      <figure id="film" class="film">
+        <video controls playsinline preload="metadata" width="1280" height="720"
+          poster="assets/istech-class-intro-poster.jpg"
+          aria-labelledby="film-caption" aria-describedby="film-duration">
+          <source src="assets/istech-class-intro.mp4" type="video/mp4">
+        </video>
+        <figcaption>
+          <div>
+            <strong id="film-caption">５C（ファイブシー）が紹介する、istechの開発クラス</strong>
+            <span id="film-duration">正装CM · 約51秒</span>
+          </div>
+          <a href="assets/istech-class-intro.mp4">MP4を開く<span aria-hidden="true"> ↗</span></a>
+        </figcaption>
+      </figure>
+    </section>
+
+    <section class="policy" id="policy" aria-labelledby="policy-title">
+      <div class="wrap policy-inner">
+        <div>
+          <p class="label">開発方針</p>
+          <h2 id="policy-title" lang="en">istech must<br>be technical.</h2>
+        </div>
+        <div class="policy-copy">
+          <h3>考え方を、技術と検証で形にする。</h3>
+          <p>名前には、そんな姿勢を込めています。</p>
+          <p>接続は必要な範囲に限ります。外とつながるときは、その範囲と理由が分かる道具を目指します。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="classes wrap" id="classes" aria-labelledby="classes-title">
+      <header class="classes-intro">
+        <h2 id="classes-title">5つの開発クラス</h2>
+        <p>製品やツールを、ネットワークの使い方で分類します。各商品のクラスと、その根拠は商品ページで説明します。</p>
+        <p>開発者が自己判定する設計上の分類です。判定の対象は通信範囲に限ります。</p>
+      </header>
+      <ul class="class-list">
+        <li class="class-row corundum">
+          <figure class="class-portrait">
+            <div class="portrait-image" aria-hidden="true"></div>
+            <figcaption>鋼玉 エメリー</figcaption>
+          </figure>
+          <div class="class-name"><span lang="en">Corundum</span><h3>コランダム</h3></div>
+          <div class="class-description">
+            <p class="class-summary">通信機能を持たない</p>
+            <p>ネットワーク通信の機能を組み込まず、端末内で完結させる設計です。Android製品では、通信権限がないことと、通信ライブラリが混入していないことを検査します。</p>
+          </div>
+        </li>
+        <li class="class-row topaz">
+          <figure class="class-portrait">
+            <div class="portrait-image" aria-hidden="true"></div>
+            <figcaption>黄玉 雅</figcaption>
+          </figure>
+          <div class="class-name"><span lang="en">Topaz</span><h3>トパーズ</h3></div>
+          <div class="class-description">
+            <p class="class-summary">通信できない構成にする</p>
+            <p>通信機能を含むライブラリを使う場合でも、OSの権限などでアプリ自身が通信できない構成にします。ライブラリを使う理由と、出荷物で通信できないことを確認します。</p>
+          </div>
+        </li>
+        <li class="class-row quartz">
+          <figure class="class-portrait">
+            <div class="portrait-image" aria-hidden="true"></div>
+            <figcaption>英 水晶</figcaption>
+          </figure>
+          <div class="class-name"><span lang="en">Quartz</span><h3>クォーツ</h3></div>
+          <div class="class-description">
+            <p class="class-summary">近くの機器とだけつながる</p>
+            <p>LAN・Bluetooth・USBなど、手元や同じ場所の機器との連携に範囲を限ります。インターネット越しの通信は行いません。</p>
+          </div>
+        </li>
+        <li class="class-row iron">
+          <figure class="class-portrait">
+            <div class="portrait-image" aria-hidden="true"></div>
+            <figcaption>玉鋼 たたら</figcaption>
+          </figure>
+          <div class="class-name"><span lang="en">Iron</span><h3>アイアン</h3></div>
+          <div class="class-description">
+            <p class="class-summary">外の情報を取りに行く</p>
+            <p>更新情報などを外部サービスから取得します。外部への送信は取得に必要なログインや検索条件に限ります。利用者の書類や記録をアップロードする用途には使いません。</p>
+          </div>
+        </li>
+        <li class="class-row fluorite">
+          <figure class="class-portrait">
+            <div class="portrait-image" aria-hidden="true"></div>
+            <figcaption>蛍 フローラ</figcaption>
+          </figure>
+          <div class="class-name"><span lang="en">Fluorite</span><h3>フローライト</h3></div>
+          <div class="class-description">
+            <p class="class-summary">双方向にやり取りする</p>
+            <p>クラウド同期、オンラインでの読み書き、常時接続やVPNでの遠隔操作を扱います。実績ある外部の基盤を使い、istechがアプリや業務システムを開発します。</p>
+          </div>
+        </li>
+      </ul>
+    </section>
+
+    <div class="product-notes">
+      <div class="wrap product-notes-inner">
+        <section aria-labelledby="data-protection-title">
+          <h2 id="data-protection-title">接続の範囲と、データの守り方をセットで</h2>
+          <p>通信できる範囲が広がるほど、それに見合う保護を求めます。</p>
+          <p>オフラインの製品で書き出したファイルも、内容に応じた管理が必要です。暗号化・認証・書き出し時の注意を、扱うデータに合わせて説明します。</p>
+        </section>
+        <section aria-labelledby="verification-title">
+          <h2 id="verification-title">確かめられるものづくり</h2>
+          <p>設計上の方針とあわせて、確認方法と制約も説明します。</p>
+          <p>対応環境・機能・検証資料・利用条件は、それぞれの商品ページをご覧ください。</p>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="wrap footer-inner">
+      <a class="brand" href="#top" aria-label="istech ページ先頭">
+        <img src="assets/istech-logo.png" alt="" width="909" height="388">
+      </a>
+      <div class="contact">
+        <h2>お問い合わせ</h2>
+        <p>BOOTHのメッセージからどうぞ。</p>
+      </div>
+      <p>映像の音楽に使用した残響素材<br>
+        <a href="https://zenodo.org/records/2639677">MAIR</a>
+        · © 2017 Hyunkook Lee、Connor Millns（University of Huddersfield）
+        · <a href="https://creativecommons.org/licenses/by/4.0/deed.ja">CC BY 4.0</a>（残響の長さと減衰を調整して使用）
+      </p>
+    </div>
+  </footer>
+</body>
+</html>
