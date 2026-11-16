@@ -106,7 +106,15 @@ nav a:hover { text-decoration: underline; }
   font-size: 0.875rem;
 }
 .film figcaption span#film-duration { display: block; color: var(--secondary); font-size: 0.8125rem; }
-.film a { color: var(--accent); white-space: nowrap; }
+.film-links { display: flex; flex-wrap: wrap; gap: 0 1rem; }
+.film-links a {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
+  min-height: 2.75rem;
+  color: var(--accent);
+  white-space: nowrap;
+}
 
 .policy { background: #18283c; color: #faf9f2; }
 .policy :focus-visible { outline-color: #b9cbe3; }
