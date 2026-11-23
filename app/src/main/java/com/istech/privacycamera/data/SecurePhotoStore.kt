@@ -29,6 +29,11 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.IOException
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * A single stored photo: the masked preview plus its user-added metadata.
@@ -80,6 +85,8 @@ class SecurePhotoStore(
 ) {
 
     private val baseDir = File(context.filesDir, "secure").apply { mkdirs() }
+    // All instances for this app-private store share the same read-modify-write lock.
+    private val stateLock = stateLocks.computeIfAbsent(baseDir.canonicalPath) { Any() }
     private val originalsDir = File(baseDir, "originals").apply { mkdirs() }
     private val maskedDir = File(baseDir, "masked").apply { mkdirs() }
     private val metaDir = File(baseDir, "meta").apply { mkdirs() }
@@ -296,12 +303,16 @@ class SecurePhotoStore(
 
     /** Stages [bytes] in a uniquely named neighbour and renames it into place. */
     private fun writeAtomically(target: File, bytes: () -> ByteArray) {
-        val tmp = File(target.parentFile, "${target.name}.tmp.${System.nanoTime()}")
+        val tmp = File.createTempFile("${target.name}.tmp.", null, target.parentFile)
         try {
-            tmp.writeBytes(bytes())
-            if (!tmp.renameTo(target)) {
-                target.writeBytes(tmp.readBytes())
+            FileOutputStream(tmp).use { out ->
+                out.write(bytes())
+                out.fd.sync()
             }
+            // Same-directory rename is atomic on the supported filesystem. If it cannot
+            // replace the target, fail WITHOUT a copy-over fallback that could truncate it.
+            Files.move(tmp.toPath(), target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
         } finally {
             tmp.delete()
         }
@@ -325,32 +336,50 @@ class SecurePhotoStore(
         return id
     }
 
-    /** Lists stored photos, newest first, with metadata applied. */
-    fun list(): List<PhotoItem> {
-        return maskedDir.listFiles { f -> f.extension == "jpg" }
-            ?.map { f ->
+    /** A display snapshot is explicitly incomplete when records cannot be read. */
+    data class PhotoListing(val photos: List<PhotoItem>, val unreadableCount: Int)
+
+    /** Strict inventory for backup and identity checks: never silently omit a record. */
+    fun list(): List<PhotoItem> = scanPhotos(trash = false, allowPartial = false).photos
+
+    /** Readable photos remain usable without rebuilding or changing damaged metadata. */
+    fun listForDisplay(): PhotoListing = scanPhotos(trash = false, allowPartial = true)
+
+    private fun scanPhotos(trash: Boolean, allowPartial: Boolean): PhotoListing = synchronized(stateLock) {
+        val dir = if (trash) trashMaskedDir else maskedDir
+        val files = dir.listFiles { f -> f.extension == "jpg" }
+            ?: throw IOException("Cannot list stored photos")
+        var unreadable = 0
+        val photos = files.mapNotNull { f ->
+            try {
                 val id = f.nameWithoutExtension
-                val meta = readMeta(id)
-                val createdAt =
-                    meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified()
+                val meta = if (trash) readTrashMeta(id) else readMeta(id)
+                val createdAt = meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified()
                 val caption = meta?.optString("caption", "") ?: ""
                 val category = meta?.optString("category", PhotoCategories.UNCLASSIFIED)
                     ?: PhotoCategories.UNCLASSIFIED
                 PhotoItem(
                     id = id,
-                    uuid = ensureUuid(id, meta, caption, category, createdAt),
+                    uuid = if (trash) meta?.optString("uuid", "") ?: ""
+                        else ensureUuid(id, meta, caption, category, createdAt),
                     maskedFile = f,
                     createdAt = createdAt,
                     caption = caption,
-                    category = category
+                    category = category,
+                    deletedAt = if (trash) meta?.optLong("deletedAt", f.lastModified())
+                        ?: f.lastModified() else 0L
                 )
+            } catch (e: StorageIntegrityException) {
+                if (!allowPartial) throw e
+                unreadable++
+                null
             }
-            ?.sortedByDescending { it.createdAt }
-            ?: emptyList()
+        }.sortedByDescending { if (trash) it.deletedAt else it.createdAt }
+        PhotoListing(photos, unreadable)
     }
 
     /** Updates the caption/category for a photo, preserving its original timestamp and uuid. */
-    fun updateMeta(id: String, caption: String, category: String) {
+    fun updateMeta(id: String, caption: String, category: String): Unit = synchronized(stateLock) {
         val meta = readMeta(id)
         val createdAt = meta?.optLong("createdAt", System.currentTimeMillis())
             ?: System.currentTimeMillis()
@@ -364,7 +393,8 @@ class SecurePhotoStore(
      * changes the geometry, any saved custom mask spec is dropped and the preview falls
      * back to the safe whole-frame mosaic (over-masks rather than under-masks).
      */
-    fun replaceOriginal(id: String, jpegBytes: ByteArray) {
+    fun replaceOriginal(id: String, jpegBytes: ByteArray): Unit = synchronized(stateLock) {
+        val existingMeta = readMeta(id)
         File(originalsDir, "$id.enc").writeBytes(encryptBytes(jpegBytes))
         val src = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
         val masked = MaskingEngine.mask(src)
@@ -373,7 +403,7 @@ class SecurePhotoStore(
         }
         src.recycle()
         masked.recycle()
-        readMeta(id)?.let { meta ->
+        existingMeta?.let { meta ->
             if (meta.has("mask")) {
                 meta.remove("mask")
                 writeMetaIn(metaDir, id, meta)
@@ -403,7 +433,8 @@ class SecurePhotoStore(
      * original according to [spec] and persists the spec so it can be re-edited. Returns
      * false if the original is unavailable.
      */
-    fun applyMask(id: String, spec: MaskingEngine.MaskSpec): Boolean {
+    fun applyMask(id: String, spec: MaskingEngine.MaskSpec): Boolean = synchronized(stateLock) {
+        val meta = readMeta(id) ?: JSONObject()
         val original = decryptOriginal(id) ?: return false
         val masked = MaskingEngine.render(original, spec)
         File(maskedDir, "$id.jpg").outputStream().use { out ->
@@ -411,7 +442,6 @@ class SecurePhotoStore(
         }
         original.recycle()
         masked.recycle()
-        val meta = readMeta(id) ?: JSONObject()
         meta.put("mask", MaskingEngine.specToJson(spec))
         writeMetaIn(metaDir, id, meta)
         return true
@@ -428,60 +458,40 @@ class SecurePhotoStore(
      * Soft-deletes a photo: moves it to the trash and stamps it with the deletion time.
      * It stays recoverable until [TRASH_TTL_MILLIS] elapses (see [purgeExpiredTrash]).
      */
-    fun delete(id: String) {
-        val deletedAt = System.currentTimeMillis()
-        // Read the record BEFORE moving anything: if it cannot be read because the key is not
-        // in hand, this must throw with the photo still where it was, not half in the trash.
+    fun delete(id: String): Unit = synchronized(stateLock) {
+        if (!File(originalsDir, "$id.enc").exists() && !File(maskedDir, "$id.jpg").exists()) return
         val meta = readMeta(id) ?: JSONObject()
+        loadDeletedUuids() // Refuse a corrupt ledger before moving any photo files.
+        meta.put("deletedAt", System.currentTimeMillis())
+        // First persist the recoverable record and tombstone. An interruption may leave
+        // duplicate metadata, but must not move the photo without its memo and identity.
+        writeMetaIn(trashMetaDir, id, meta)
+        addDeletedUuid(meta.optString("uuid", ""))
         move(File(originalsDir, "$id.enc"), File(trashOriginalsDir, "$id.enc"))
         move(File(maskedDir, "$id.jpg"), File(trashMaskedDir, "$id.jpg"))
-        // Tombstone the uuid so a later backup restore won't resurrect this photo here.
-        addDeletedUuid(meta.optString("uuid", ""))
-        meta.put("deletedAt", deletedAt)
-        writeMetaIn(trashMetaDir, id, meta)
-        // Every form goes: the encrypted record, any plaintext one an older install left,
-        // and any half-written staging file from an interrupted save.
         clearMetaFiles(metaDir, id)
     }
 
-    /** Lists trashed photos, most-recently-deleted first. */
-    fun listTrash(): List<PhotoItem> {
-        return trashMaskedDir.listFiles { f -> f.extension == "jpg" }
-            ?.map { f ->
-                val id = f.nameWithoutExtension
-                val meta = readTrashMeta(id)
-                PhotoItem(
-                    id = id,
-                    uuid = meta?.optString("uuid", "") ?: "",
-                    maskedFile = f,
-                    createdAt = meta?.optLong("createdAt", f.lastModified()) ?: f.lastModified(),
-                    caption = meta?.optString("caption", "") ?: "",
-                    category = meta?.optString("category", PhotoCategories.UNCLASSIFIED)
-                        ?: PhotoCategories.UNCLASSIFIED,
-                    deletedAt = meta?.optLong("deletedAt", f.lastModified()) ?: f.lastModified()
-                )
-            }
-            ?.sortedByDescending { it.deletedAt }
-            ?: emptyList()
-    }
+    /** Strict trash inventory for operations that require every stored identity. */
+    fun listTrash(): List<PhotoItem> = scanPhotos(trash = true, allowPartial = false).photos
+
+    fun listTrashForDisplay(): PhotoListing = scanPhotos(trash = true, allowPartial = true)
 
     /** Restores a trashed photo back to the live library, clearing its deletion stamp. */
-    fun restore(id: String) {
-        move(File(trashOriginalsDir, "$id.enc"), File(originalsDir, "$id.enc"))
-        move(File(trashMaskedDir, "$id.jpg"), File(maskedDir, "$id.jpg"))
-        // If the trash record is missing (a delete that was interrupted between moving the
-        // files and writing the record), fall back to whatever is still in the live folder
-        // rather than writing an empty object over a memo that survived.
+    fun restore(id: String): Unit = synchronized(stateLock) {
+        if (!File(trashOriginalsDir, "$id.enc").exists() && !File(trashMaskedDir, "$id.jpg").exists()) return
         val meta = readTrashMeta(id) ?: readMeta(id) ?: JSONObject()
-        // The photo is back in the library, so lift its tombstone.
-        removeDeletedUuid(meta.optString("uuid", ""))
+        loadDeletedUuids() // No photo is moved if deletion history cannot be read.
         meta.remove("deletedAt")
         writeMetaIn(metaDir, id, meta)
+        move(File(trashOriginalsDir, "$id.enc"), File(originalsDir, "$id.enc"))
+        move(File(trashMaskedDir, "$id.jpg"), File(maskedDir, "$id.jpg"))
+        removeDeletedUuid(meta.optString("uuid", ""))
         clearMetaFiles(trashMetaDir, id)
     }
 
     /** Permanently removes a single trashed photo. */
-    fun purge(id: String) {
+    fun purge(id: String): Unit = synchronized(stateLock) {
         File(trashOriginalsDir, "$id.enc").delete()
         File(trashMaskedDir, "$id.jpg").delete()
         clearMetaFiles(trashMetaDir, id)
@@ -500,17 +510,22 @@ class SecurePhotoStore(
     }
 
     /** Permanently removes every trashed photo. */
-    fun emptyTrash() {
+    fun emptyTrash(): Unit = synchronized(stateLock) {
         trashMaskedDir.listFiles { f -> f.extension == "jpg" }
             ?.forEach { purge(it.nameWithoutExtension) }
     }
 
     /** Permanently removes trashed photos older than [TRASH_TTL_MILLIS]. */
-    fun purgeExpiredTrash() {
+    fun purgeExpiredTrash(): Unit = synchronized(stateLock) {
         val cutoff = System.currentTimeMillis() - TRASH_TTL_MILLIS
         trashMaskedDir.listFiles { f -> f.extension == "jpg" }?.forEach { f ->
             val id = f.nameWithoutExtension
-            val deletedAt = readTrashMeta(id)?.optLong("deletedAt", 0L) ?: 0L
+            val deletedAt = try {
+                readTrashMeta(id)?.optLong("deletedAt", 0L) ?: 0L
+            } catch (e: StorageIntegrityException) {
+                // Preserve the unreadable record; it must not hide or purge other photos.
+                return@forEach
+            }
             if (deletedAt in 1L until cutoff) purge(id)
         }
     }
@@ -559,44 +574,44 @@ class SecurePhotoStore(
      * lifetime import cap: the set only grows, so deleting an imported photo never frees a
      * slot (which would otherwise allow a delete -> re-import loop past the cap).
      */
-    fun loadImportedUuids(): Set<String> {
-        if (!importedUuidsFile.exists()) return emptySet()
-        return try {
-            val arr = JSONArray(importedUuidsFile.readText())
-            (0 until arr.length()).map { arr.getString(it) }.toSet()
-        } catch (e: Exception) {
-            emptySet()
-        }
+    fun loadImportedUuids(): Set<String> = synchronized(stateLock) {
+        readIdentitySet(importedUuidsFile)
     }
 
     /** Records [uuids] as imported-via-migration (union with the existing set). */
-    fun addImportedUuids(uuids: Collection<String>) {
+    fun addImportedUuids(uuids: Collection<String>): Unit = synchronized(stateLock) {
         if (uuids.isEmpty()) return
         val merged = loadImportedUuids().toMutableSet().apply { addAll(uuids) }
         val arr = JSONArray()
         merged.forEach { arr.put(it) }
-        importedUuidsFile.writeText(arr.toString())
+        writeAtomically(importedUuidsFile) { arr.toString().toByteArray(Charsets.UTF_8) }
     }
 
     /** UUIDs the user has deleted on this install (tombstones); see [deletedUuidsFile]. */
-    fun loadDeletedUuids(): Set<String> {
-        if (!deletedUuidsFile.exists()) return emptySet()
-        return try {
-            val arr = JSONArray(deletedUuidsFile.readText())
-            (0 until arr.length()).map { arr.getString(it) }.toSet()
+    fun loadDeletedUuids(): Set<String> = synchronized(stateLock) {
+        readIdentitySet(deletedUuidsFile)
+    }
+
+    private fun readIdentitySet(file: File): Set<String> {
+        if (!file.exists()) return emptySet()
+        try {
+            val arr = JSONArray(file.readText())
+            return (0 until arr.length()).map { arr.getString(it) }.toSet()
         } catch (e: Exception) {
-            emptySet()
+            // An unreadable ledger is not an empty history: resetting it would allow
+            // re-imports or resurrect photos the owner deliberately deleted.
+            throw StorageIntegrityException(file.name, e)
         }
     }
 
     private fun writeDeletedUuids(set: Set<String>) {
         val arr = JSONArray()
         set.forEach { arr.put(it) }
-        deletedUuidsFile.writeText(arr.toString())
+        writeAtomically(deletedUuidsFile) { arr.toString().toByteArray(Charsets.UTF_8) }
     }
 
     /** Marks [uuid] as deleted-on-this-device so a backup restore won't resurrect it. */
-    private fun addDeletedUuid(uuid: String) {
+    private fun addDeletedUuid(uuid: String): Unit = synchronized(stateLock) {
         if (uuid.isEmpty()) return
         val set = loadDeletedUuids()
         if (uuid in set) return
@@ -604,7 +619,7 @@ class SecurePhotoStore(
     }
 
     /** Clears [uuid]'s tombstone (the photo is back), e.g. when restored from the trash. */
-    private fun removeDeletedUuid(uuid: String) {
+    private fun removeDeletedUuid(uuid: String): Unit = synchronized(stateLock) {
         if (uuid.isEmpty()) return
         val set = loadDeletedUuids()
         if (uuid !in set) return
@@ -612,21 +627,24 @@ class SecurePhotoStore(
     }
 
     /** User-defined categories (persisted across sessions). */
-    fun loadCustomCategories(): List<String> {
-        val text = when {
-            categoriesFile.exists() -> try {
-                String(decryptBytes(categoriesFile.readBytes()), Charsets.UTF_8)
-            } catch (e: Exception) {
-                return emptyList()
-            }
-            legacyCategoriesFile.exists() -> legacyCategoriesFile.readText()
+    fun loadCustomCategories(): List<String> = synchronized(stateLock) {
+        val file = when {
+            categoriesFile.exists() -> categoriesFile
+            legacyCategoriesFile.exists() -> legacyCategoriesFile
             else -> return emptyList()
         }
-        return try {
+        try {
+            val text = if (file == categoriesFile) {
+                String(decryptBytes(file.readBytes()), Charsets.UTF_8)
+            } else file.readText()
             val arr = JSONArray(text)
-            (0 until arr.length()).map { arr.getString(it) }
+            return (0 until arr.length()).map { arr.getString(it) }
+        } catch (e: VaultClosedException) {
+            throw e
+        } catch (e: SealKeyUnavailableException) {
+            throw e
         } catch (e: Exception) {
-            emptyList()
+            throw StorageIntegrityException(file.name, e)
         }
     }
 
@@ -634,21 +652,23 @@ class SecurePhotoStore(
     private fun saveCustomCategories(names: List<String>) {
         val arr = JSONArray()
         names.forEach { arr.put(it) }
-        categoriesFile.writeBytes(encryptBytes(arr.toString().toByteArray(Charsets.UTF_8)))
+        writeAtomically(categoriesFile) {
+            encryptBytes(arr.toString().toByteArray(Charsets.UTF_8))
+        }
         legacyCategoriesFile.delete()
     }
 
     /** Moves a plaintext category list from an older install into the encrypted form. */
-    private fun migrateCategoriesToEncrypted() {
-        if (!legacyCategoriesFile.exists() || categoriesFile.exists()) {
-            // Nothing to do, or the encrypted form already won.
-            if (categoriesFile.exists()) legacyCategoriesFile.delete()
-            return
-        }
+    private fun migrateCategoriesToEncrypted(): Unit = synchronized(stateLock) {
+        if (!legacyCategoriesFile.exists()) return
         try {
-            saveCustomCategories(loadCustomCategories())
+            if (categoriesFile.exists()) {
+                // Verify the replacement before discarding the only readable old copy.
+                loadCustomCategories()
+                legacyCategoriesFile.delete()
+            } else saveCustomCategories(loadCustomCategories())
         } catch (e: Exception) {
-            // Keep the plaintext and retry next launch, same as the per-photo records.
+            // Keep both versions untouched and retry after the read problem is resolved.
         }
     }
 
@@ -659,7 +679,7 @@ class SecurePhotoStore(
      * That is why the caller must check the name is unused first — [CategoryCatalog.build]
      * would otherwise put it straight back (a category in use is always offered).
      */
-    fun removeCustomCategory(name: String) {
+    fun removeCustomCategory(name: String): Unit = synchronized(stateLock) {
         val trimmed = name.trim()
         if (trimmed.isEmpty() || PhotoCategories.isBuiltIn(trimmed)) return
         val current = loadCustomCategories().toMutableList()
@@ -668,7 +688,7 @@ class SecurePhotoStore(
     }
 
     /** Adds a new custom category if it is non-blank and not already known. */
-    fun addCustomCategory(name: String) {
+    fun addCustomCategory(name: String): Unit = synchronized(stateLock) {
         val trimmed = name.trim()
         if (trimmed.isEmpty() || PhotoCategories.isBuiltIn(trimmed)) return
         val current = loadCustomCategories().toMutableList()
@@ -854,39 +874,35 @@ class SecurePhotoStore(
      * Reads one metadata record, preferring the encrypted form and falling back to the
      * plaintext file left by an older install (see [migratePlaintextToEncrypted]).
      */
-    private fun readMetaIn(dir: File, id: String): JSONObject? {
+    private fun readMetaIn(dir: File, id: String): JSONObject? = synchronized(stateLock) {
         val enc = File(dir, "$id.enc")
         if (enc.exists()) {
             try {
                 return JSONObject(String(decryptBytes(enc.readBytes()), Charsets.UTF_8))
             } catch (e: VaultClosedException) {
-                // The record is fine; the key is just not in hand. Quarantining it here would
-                // send the caller off to rebuild it from nothing, and a library read while
-                // closed would lose every memo, category and uuid in it. Leave it untouched.
                 throw e
             } catch (e: SealKeyUnavailableException) {
-                // Same: a seal whose private key did not load is unreadable, not damaged.
                 throw e
             } catch (e: Exception) {
-                // Returning "no metadata" here would be quietly destructive: the callers all
-                // rebuild from an empty object and write it straight back, so a single
-                // unreadable record would lose the memo, the category, the mask spec and the
-                // uuid (which the tombstone and de-duplication lists are keyed on).
-                // Move the unreadable bytes aside instead, so the write that follows creates
-                // a fresh record without overwriting evidence that could still be recovered.
-                enc.renameTo(File(dir, "$id.enc.unreadable"))
+                // Never turn a failed read into 'missing'. In particular, listing must not
+                // mint a new uuid, lose memos, or overwrite bytes after a failed quarantine.
+                throw StorageIntegrityException(enc.name, e)
             }
         }
+        // Older versions may already have quarantined this record. Keep that evidence and
+        // refuse to create a replacement identity in its absence.
+        val quarantined = File(dir, "$id.enc.unreadable")
+        if (quarantined.exists()) throw StorageIntegrityException(quarantined.name)
         return readLegacyMeta(dir, id)
     }
 
     private fun readLegacyMeta(dir: File, id: String): JSONObject? {
         val f = File(dir, "$id.json")
         if (!f.exists()) return null
-        return try {
-            JSONObject(f.readText())
+        try {
+            return JSONObject(f.readText())
         } catch (e: Exception) {
-            null
+            throw StorageIntegrityException(f.name, e)
         }
     }
 
@@ -934,16 +950,13 @@ class SecurePhotoStore(
      * leave a truncated record where a readable one used to be. The plaintext file is only
      * deleted once the encrypted one is in place.
      */
-    private fun writeMetaIn(dir: File, id: String, json: JSONObject) {
-        val target = File(dir, "$id.enc")
-        // Unique per write: two IO threads (the gallery refresh and the trash refresh) can
-        // stage the same id at once, and a shared name would let them overwrite each other.
-        val tmp = File(dir, "$id.enc.tmp.${System.nanoTime()}")
-        tmp.writeBytes(encryptBytes(json.toString().toByteArray(Charsets.UTF_8)))
-        if (!tmp.renameTo(target)) {
-            target.writeBytes(tmp.readBytes())
+    private fun writeMetaIn(dir: File, id: String, json: JSONObject): Unit = synchronized(stateLock) {
+        // A write must not replace an existing unreadable record, even if its caller
+        // supplied a complete new object (migration, restore, or mask updates).
+        readMetaIn(dir, id)
+        writeAtomically(File(dir, "$id.enc")) {
+            encryptBytes(json.toString().toByteArray(Charsets.UTF_8))
         }
-        tmp.delete()
         File(dir, "$id.json").delete()
     }
 
@@ -1034,12 +1047,17 @@ class SecurePhotoStore(
             .sortedBy { it.absolutePath }
             .toList()
 
-    fun migratePlaintextToEncrypted() {
+    fun migratePlaintextToEncrypted(): Unit = synchronized(stateLock) {
         migrateCategoriesToEncrypted()
         listOf(metaDir, trashMetaDir).forEach { dir ->
             dir.listFiles { f -> f.extension == "json" }?.forEach { legacy ->
                 val id = legacy.nameWithoutExtension
                 try {
+                    if (File(dir, "$id.enc").exists()) {
+                        readMetaIn(dir, id)
+                        legacy.delete()
+                        return@forEach
+                    }
                     val json = JSONObject(legacy.readText())
                     writeMetaIn(dir, id, json) // deletes the plaintext once the .enc lands
                 } catch (e: Exception) {
@@ -1050,6 +1068,8 @@ class SecurePhotoStore(
     }
 
     companion object {
+        private val stateLocks = ConcurrentHashMap<String, Any>()
+
         // Detail access-log retention: keep whichever is larger of "last N days" or "last N
         // entries" (see compactAccessLogIfNeeded), then roll the rest into monthly archives.
         private const val DETAIL_RETENTION_DAYS = 365L

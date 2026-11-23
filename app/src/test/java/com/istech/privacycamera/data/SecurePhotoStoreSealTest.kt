@@ -197,16 +197,19 @@ class SecurePhotoStoreSealTest {
     }
 
     @Test
-    fun `本当に壊れている記録は、今までどおり脇へ退ける`() {
-        // 退ける仕組み自体は残っている（鍵が閉じているのとは別の話）。
+    fun `本当に壊れている記録もその場で保全し新しい識別子へ置き換えない`() {
         val opened = VaultSession(keysDir) { error("no legacy key") }.also { it.open(master) }
         val store = storeFor(opened)
         val photo = store.save(jpeg, "壊す", "母")
         File(secureDir, "meta/${photo.id}.enc").writeBytes("これは壊れた記録".toByteArray())
 
-        store.list()
-
-        assertThat(File(secureDir, "meta/${photo.id}.enc.unreadable").exists()).isTrue()
+        val before = snapshot()
+        assertThrows(StorageIntegrityException::class.java) { store.list() }
+        assertThrows(StorageIntegrityException::class.java) {
+            store.updateMeta(photo.id, "書き換えない", "書き換えない")
+        }
+        assertThat(snapshot()).isEqualTo(before)
+        assertThat(File(secureDir, "meta/${photo.id}.enc.unreadable").exists()).isFalse()
     }
 
     @Test

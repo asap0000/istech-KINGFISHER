@@ -19,6 +19,8 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import com.google.common.truth.Truth.assertThat
 import java.io.File
+import java.io.IOException
+import org.junit.Assert.assertThrows
 import org.json.JSONObject
 import org.junit.Before
 import org.junit.Test
@@ -167,15 +169,19 @@ class SecurePhotoStoreMetaTest {
     }
 
     @Test
-    fun `復号できない記録は上書きせず退避される`() {
+    fun `復号できない記録は新しい記録で上書きされない`() {
         // Otherwise one unreadable record turns a plain read into a destructive write: the
         // memo, category, mask spec and uuid would all be rebuilt from nothing.
         val dir = File(secureDir, "meta").apply { mkdirs() }
         File(dir, "IMG_1.enc").writeBytes("not encrypted by this store".toByteArray())
         val store = newStore()
 
-        store.updateMeta("IMG_1", "新しいメモ", "母")
+        val before = File(dir, "IMG_1.enc").readBytes()
+        assertThrows(IOException::class.java) {
+            store.updateMeta("IMG_1", "新しいメモ", "母")
+        }
 
-        assertThat(File(dir, "IMG_1.enc.unreadable").exists()).isTrue()
+        assertThat(File(dir, "IMG_1.enc").readBytes()).isEqualTo(before)
+        assertThat(File(dir, "IMG_1.enc.unreadable").exists()).isFalse()
     }
 }

@@ -38,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -77,6 +78,7 @@ fun TrashScreen(
     viewModel: PhotoViewModel = viewModel()
 ) {
     val trash by viewModel.trash.collectAsState()
+    val storageWarning by viewModel.storageWarning.collectAsState()
     val context = LocalContext.current
     var selected by remember { mutableStateOf<PhotoItem?>(null) }
     var showEmptyConfirm by remember { mutableStateOf(false) }
@@ -102,15 +104,29 @@ fun TrashScreen(
             )
         }
     ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+        storageWarning?.let { warning ->
+            Surface(
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+            ) {
+                Text(
+                    warning,
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+        }
         if (trash.isEmpty()) {
             Box(
                 modifier = Modifier
-                    .fillMaxSize()
-                    .padding(padding),
+                    .fillMaxSize(),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    "ゴミ箱は空です\n削除した写真は30日間ここに保存され、復元できます",
+                    if (storageWarning != null) "表示できる写真はありません"
+                    else "ゴミ箱は空です\n削除した写真は30日間ここに保存され、復元できます",
                     textAlign = TextAlign.Center,
                     style = MaterialTheme.typography.bodyLarge
                 )
@@ -121,13 +137,14 @@ fun TrashScreen(
                 contentPadding = PaddingValues(8.dp),
                 modifier = Modifier
                     .fillMaxSize()
-                    .padding(padding)
             ) {
                 items(trash, key = { it.id }) { item ->
                     TrashCard(item = item, onClick = { selected = item })
                 }
             }
         }
+    }
+
     }
 
     selected?.let { item ->

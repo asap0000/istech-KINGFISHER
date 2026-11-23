@@ -36,6 +36,10 @@ import com.istech.privacycamera.data.MaskingEngine
 import com.istech.privacycamera.data.PhotoCategories
 import com.istech.privacycamera.data.PhotoItem
 import com.istech.privacycamera.data.SecurePhotoStore
+import com.istech.privacycamera.data.StorageIntegrityException
+import java.io.IOException
+import java.util.concurrent.atomic.AtomicLong
+import kotlinx.coroutines.CoroutineExceptionHandler
 import com.istech.privacycamera.ui.BackupGate
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -54,7 +58,33 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     private val store: SecurePhotoStore = application.photoStore
     private val settings: AppSettings = application.appSettings
 
+    /** Read/write failures are visible; they must never be presented as an empty library. */
+    private val _storageWarning = MutableStateFlow<String?>(null)
+    private val _unreadablePhotos = MutableStateFlow(0)
+    private val _unreadableTrash = MutableStateFlow(0)
+    val storageWarning: StateFlow<String?> =
+        combine(_storageWarning, _unreadablePhotos, _unreadableTrash) { failure, live, trash ->
+            failure ?: if (live + trash > 0)
+                "読み出せない写真があります（保管中 $live 枚・ゴミ箱 $trash 枚）。" +
+                    "読み出せる写真だけを表示しています。アプリのデータは消去しないでください。"
+            else null
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    // Keep the normal AndroidViewModel(Application) factory signature unchanged. Expected
+    // storage failures stop this operation, while programming failures still reach the caller.
+    private val storageFailureHandler = CoroutineExceptionHandler { _, error ->
+        when (error) {
+            is IOException -> _storageWarning.value =
+                "保存された記録の読み書きに失敗しました。写真や記録を空の内容で置き換えず、操作を中止しました。" +
+                    "アプリのデータを消去せず、サポートへご連絡ください。"
+            is VaultClosedException, is SealKeyUnavailableException -> Unit
+            else -> throw error
+        }
+    }
+
     private val _photos = MutableStateFlow<List<PhotoItem>>(emptyList())
+    private val photoRefreshGeneration = AtomicLong()
+    private val trashRefreshGeneration = AtomicLong()
     val photos: StateFlow<List<PhotoItem>> = _photos.asStateFlow()
 
     /** Currently selected category filter (null = show all). */
@@ -143,7 +173,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         // returns nothing and a write throws — which is exactly what happened when this
         // started eagerly: the app crashed on launch with "vault is closed", because the
         // plaintext migration below tried to encrypt while the lock screen was still up.
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             application.vaultSession.isOpenFlow.collect { open ->
                 if (open) startUp()
             }
@@ -159,7 +189,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * while it is in flight, so starting it alongside the first load is safe.
      */
     private fun startUp() {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             // First, before anything reads the log: lines queued while the vault was closed
             // (photos taken before unlocking) go into the real log at the time they happened.
             // Failing to fold must not keep the gallery from opening; the lines stay queued
@@ -187,7 +217,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         // Like refresh(): with the vault closed there is nothing readable, and a read that
         // "finds nothing" is indistinguishable from an empty library.
         if (!application.vaultSession.isOpen) return
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             _customCategories.value = withContext(Dispatchers.IO) { store.loadCustomCategories() }
         }
     }
@@ -217,8 +247,9 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * first. Returns true when the category was actually removed.
      */
     fun removeCategory(name: String): Boolean {
+        if (_storageWarning.value != null || _unreadablePhotos.value > 0 || _unreadableTrash.value > 0) return false
         if (!CategoryCatalog.isRemovable(name, categoryUsage()[name] ?: 0)) return false
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.removeCustomCategory(name) }
             reloadCategories()
             if (_selectedCategory.value == name) _selectedCategory.value = null
@@ -227,30 +258,34 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun addCategory(name: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.addCustomCategory(name) }
             reloadCategories()
         }
     }
 
     fun refresh() {
-        // Never read the library without the key. This is the guard that matters most here:
-        // list() rebuilds a record it cannot read from nothing and writes it back, so a read
-        // while closed used to be able to cost the whole library its memos, categories and
-        // uuids. The store also refuses to quarantine in that case; this keeps us from asking.
+        // Display may omit unreadable records, but strict inventories used by backup and
+        // restore still fail closed. Never turn a partial gallery into a complete inventory.
         if (!application.vaultSession.isOpen) return
-        viewModelScope.launch {
+        val generation = photoRefreshGeneration.incrementAndGet()
+        viewModelScope.launch(storageFailureHandler) {
             val loaded = withContext(Dispatchers.IO) {
                 try {
-                    store.list() to store.loadImportedUuids().size
+                    store.listForDisplay()
                 } catch (e: VaultClosedException) {
                     null // closed again while reading: leave what is shown as it is
                 } catch (e: SealKeyUnavailableException) {
                     null // opened, but the sealing key did not load: unreadable, not gone
                 }
             } ?: return@launch
-            _photos.value = loaded.first
-            _importedMigrationCount.value = loaded.second
+            // Startup and user refreshes can overlap. An older snapshot must not replace
+            // a newer read after a record was repaired, edited, deleted or restored.
+            if (generation != photoRefreshGeneration.get() || !application.vaultSession.isOpen) return@launch
+            _photos.value = loaded.photos
+            _unreadablePhotos.value = loaded.unreadableCount
+            // A damaged migration ledger must not prevent readable photos from appearing.
+            _importedMigrationCount.value = withContext(Dispatchers.IO) { store.loadImportedUuids().size }
         }
     }
 
@@ -296,7 +331,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
             onLimitReached()
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val saved = withContext(Dispatchers.IO) {
                 val upright = SecurePhotoStore.rotateJpeg(jpegBytes, rotationDegrees)
                 val item = store.save(upright)
@@ -328,7 +363,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         onLimitReached: () -> Unit,
         onFailed: () -> Unit
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val result: Result<Pair<CapturedPhoto, Bitmap?>?> = withContext(Dispatchers.IO) {
                 try {
                     if (isAtSaveLimit()) {
@@ -372,7 +407,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         category: String,
         onFailed: () -> Unit = {}
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val ok = withContext(Dispatchers.IO) {
                 try {
                     store.rewriteSealedMeta(photo.id, photo.uuid, photo.createdAt, caption, category)
@@ -386,7 +421,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun updateMeta(id: String, caption: String, category: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.updateMeta(id, caption, category) }
             refresh()
         }
@@ -401,7 +436,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Pro mask editing: regenerates the masked preview from the original using [spec]. */
     fun applyMask(id: String, spec: MaskingEngine.MaskSpec, onDone: () -> Unit = {}) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.applyMask(id, spec) }
             refresh()
             onDone()
@@ -410,7 +445,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Overwrites the original with edited [jpegBytes], then refreshes the gallery. */
     fun replaceOriginal(id: String, jpegBytes: ByteArray, onDone: () -> Unit = {}) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.replaceOriginal(id, jpegBytes) }
             refresh()
             onDone()
@@ -419,7 +454,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Soft-deletes: the photo moves to the trash and is recoverable for 30 days. */
     fun delete(id: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.delete(id) }
             refresh()
             refreshTrash()
@@ -428,18 +463,21 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshTrash() {
         if (!application.vaultSession.isOpen) return // see refresh()
-        viewModelScope.launch {
+        val generation = trashRefreshGeneration.incrementAndGet()
+        viewModelScope.launch(storageFailureHandler) {
             val trash = withContext(Dispatchers.IO) {
                 try {
                     store.purgeExpiredTrash()
-                    store.listTrash()
+                    store.listTrashForDisplay()
                 } catch (e: VaultClosedException) {
                     null
                 } catch (e: SealKeyUnavailableException) {
                     null
                 }
             } ?: return@launch
-            _trash.value = trash
+            if (generation != trashRefreshGeneration.get() || !application.vaultSession.isOpen) return@launch
+            _trash.value = trash.photos
+            _unreadableTrash.value = trash.unreadableCount
         }
     }
 
@@ -452,7 +490,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
             onResult(false)
             return
         }
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.restore(id) }
             refresh()
             refreshTrash()
@@ -462,7 +500,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Permanently removes a single trashed photo (cannot be undone). */
     fun purge(id: String) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.purge(id) }
             refreshTrash()
         }
@@ -470,7 +508,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Permanently removes every trashed photo (cannot be undone). */
     fun emptyTrash() {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.emptyTrash() }
             refreshTrash()
         }
@@ -490,11 +528,11 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * later import up to its lifetime cap. Reports success/failure on the main thread.
      */
     fun exportMigrationZip(uri: Uri, onResult: (Int) -> Unit) {
-        val items = _photos.value
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             // >= 0 : number of images written; -1 : the file could not be opened/written.
             val written = withContext(Dispatchers.IO) {
                 val n = try {
+                    val items = store.list() // Refuse an incomplete export before opening the destination.
                     getApplication<Application>().contentResolver.openOutputStream(uri)?.use { out ->
                         BackupManager.exportPlainZip(out, items, store)
                     } ?: -1
@@ -512,14 +550,13 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun exportBackup(uri: Uri, passphrase: CharArray, onResult: (Boolean) -> Unit) {
-        val items = _photos.value
         _exporting.value = true
         BackupGate.isRunning = true
         // Runs on the application scope, not viewModelScope: leaving the screen must not kill
         // a half-written backup. NonCancellable additionally guarantees the logging and the
         // cleanup below happen even if the scope itself is being torn down — losing the log is
         // how the beta failures became untraceable.
-        _exportProgress.value = 0 to items.size
+        _exportProgress.value = 0 to 0
         application.backgroundScope.launch {
             val (ok, count) = withContext(NonCancellable) {
                 val resolver = getApplication<Application>().contentResolver
@@ -527,6 +564,8 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                 var verified = -1
                 var failure: String? = null
                 try {
+                    val items = store.list() // The display list can be partial; backups cannot.
+                    _exportProgress.value = 0 to items.size
                     resolver.openOutputStream(uri)?.use { out ->
                         written = BackupManager.export(out, items, store, passphrase) { done, total ->
                             _exportProgress.value = done to total
@@ -613,13 +652,18 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
         passphrase: CharArray,
         onResult: (BackupManager.RestoreOutcome) -> Unit
     ) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val outcome = withContext(Dispatchers.IO) {
                 val o = try {
-                    val existing = _photos.value.map { it.uuid }.toSet() + store.loadDeletedUuids()
+                    // Use persisted identities, not a potentially stale/failed gallery refresh.
+                    val existing = store.list().map { it.uuid }.toSet() + store.loadDeletedUuids()
                     getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
                         BackupManager.importEncrypted(input, store, passphrase, existing)
                     } ?: BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt
+                } catch (e: StorageIntegrityException) {
+                    _storageWarning.value = "保存された記録を読み出せないため、復元を中止しました。" +
+                        "既存データは消去せず、サポートへご連絡ください。"
+                    BackupManager.RestoreOutcome.LocalStoreUnreadable
                 } catch (e: Exception) {
                     BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt
                 } finally {
@@ -629,6 +673,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
                     is BackupManager.RestoreOutcome.Success ->
                         "復元 ${o.imported} 枚 / スキップ ${o.skipped} 枚"
                     BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt -> "失敗（パスフレーズ違い/破損）"
+                    BackupManager.RestoreOutcome.LocalStoreUnreadable -> "失敗（保存された記録を読み出せません）"
                     BackupManager.RestoreOutcome.NotABackup -> "失敗（バックアップ形式でない）"
                     BackupManager.RestoreOutcome.EmptyBackup -> "失敗（中身が空＝書き出しが途中で終わったファイル）"
                 }
@@ -646,7 +691,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * outcome, or null on failure.
      */
     fun importMigration(uri: Uri, onResult: (BackupManager.MigrationImportResult?) -> Unit) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val result = withContext(Dispatchers.IO) {
                 val r = try {
                     getApplication<Application>().contentResolver.openInputStream(uri)?.use { input ->
@@ -673,7 +718,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * migration cap. Reports how many were imported.
      */
     fun importImages(uris: List<Uri>, onResult: (Int) -> Unit) {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val count = withContext(Dispatchers.IO) {
                 val resolver = getApplication<Application>().contentResolver
                 var n = 0
@@ -712,13 +757,13 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     val archivedMonths: StateFlow<List<ArchivedMonth>> = _archivedMonths.asStateFlow()
 
     fun logAccess(photoId: String, action: String, caption: String, auth: String = "") {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) { store.logAccess(photoId, action, caption, auth) }
         }
     }
 
     fun refreshAccessLog() {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             _accessLog.value = withContext(Dispatchers.IO) { store.loadAccessLog() }
             _archivedMonths.value = withContext(Dispatchers.IO) { store.listArchivedMonths() }
         }
@@ -731,7 +776,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * Safe to call on every app start; a no-op run compacts nothing.
      */
     fun compactAccessLog() {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             val months = withContext(Dispatchers.IO) {
                 val compacted = store.compactAccessLogIfNeeded()
                 compacted.forEach { month ->
@@ -754,7 +799,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
      * silence (no trace at all) is intentionally not offered.
      */
     fun clearAccessLog() {
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) {
                 val erased = store.clearAccessLog()
                 store.logAccess("", AccessActions.LOG_DELETE, "履歴 $erased 件を削除")
@@ -792,7 +837,7 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     fun setPrintEnabled(enabled: Boolean) {
         settings.printEnabled = enabled
         _printEnabled.value = enabled
-        viewModelScope.launch {
+        viewModelScope.launch(storageFailureHandler) {
             withContext(Dispatchers.IO) {
                 store.logAccess(
                     "", AccessActions.SETTING_CHANGE,

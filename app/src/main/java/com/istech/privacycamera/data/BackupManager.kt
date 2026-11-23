@@ -252,6 +252,9 @@ object BackupManager {
          * they typed could ever have worked — there was nothing to decrypt.
          */
         object EmptyBackup : RestoreOutcome()
+
+        /** Local metadata/deletion history could not be read; the backup is not at fault. */
+        object LocalStoreUnreadable : RestoreOutcome()
     }
 
     /**

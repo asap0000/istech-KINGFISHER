@@ -35,6 +35,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -122,6 +123,7 @@ fun GalleryScreen(
     onOpenSecurity: () -> Unit,
     viewModel: PhotoViewModel = viewModel()
 ) {
+    val storageWarning by viewModel.storageWarning.collectAsState()
     val photos by viewModel.photos.collectAsState()
     val selectedCategory by viewModel.selectedCategory.collectAsState()
     val categories by viewModel.categories.collectAsState()
@@ -416,84 +418,102 @@ fun GalleryScreen(
                 )
             }
         ) { padding ->
-            Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // The nudge for a recovery code that was postponed at setup. A strip that is
-            // dismissed by acting on it, not a dialog: "later" exists on the setup screen so
-            // that nobody is stopped at first run without pen and paper to hand, and a modal
-            // here would take that back. It stays until a code exists, because the day it
-            // stops being possible to issue one is the day it turns out to have been needed.
-            if (!hasRecoveryCode && photos.isNotEmpty()) {
-                Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
-                        .clickable { onOpenSecurity() }
-                ) {
-                    Column(modifier = Modifier.padding(12.dp)) {
-                        Text(
-                            "回復コードがまだありません",
-                            style = MaterialTheme.typography.titleSmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                        Text(
-                            "暗証番号を忘れると、写真を開く手立てがありません。" +
-                                "ここを押して発行してください。",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
-                        )
-                    }
-                }
-            }
-            // No point offering a search box before there is anything to search.
-            if (photos.isNotEmpty()) {
-            OutlinedTextField(
-                value = query,
-                onValueChange = { viewModel.setQuery(it) },
-                label = { Text("メモ・カテゴリを検索") },
-                singleLine = true,
-                leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
-                trailingIcon = {
-                    if (query.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.setQuery("") }) {
-                            Icon(Icons.Filled.Close, contentDescription = "検索をやめる")
+            // Headers share the scrollable grid. On a short/landscape screen, long
+            // warnings must not measure the photo viewport down to zero height.
+            LazyVerticalGrid(
+                columns = GridCells.Adaptive(minSize = 150.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
+                modifier = Modifier.fillMaxSize().padding(padding)
+            ) {
+                item(span = { GridItemSpan(maxLineSpan) }) {
+                    Column {
+                    storageWarning?.let { warning ->
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 8.dp)
+                        ) {
+                            Text(
+                                warning,
+                                modifier = Modifier.padding(12.dp),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onErrorContainer
+                            )
                         }
                     }
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 8.dp)
-            )
-            }
-            if (visiblePhotos.isEmpty()) {
-                Box(
-                    modifier = Modifier.fillMaxSize(),
-                    contentAlignment = Alignment.Center
-                ) {
-                    // Say which of the two narrowings produced nothing, otherwise an empty
-                    // category reads as "the library is empty".
-                    Text(
-                        when {
-                            query.isNotEmpty() && selectedCategory != null ->
-                                "「$selectedCategory」の中に「$query」に当てはまる写真はありません"
-                            query.isNotEmpty() -> "「$query」に当てはまる写真はありません"
-                            selectedCategory != null -> "「$selectedCategory」の写真はまだありません"
-                            else -> "写真がありません"
+                    // The nudge for a recovery code that was postponed at setup. A strip that is
+                    // dismissed by acting on it, not a dialog: "later" exists on the setup screen so
+                    // that nobody is stopped at first run without pen and paper to hand, and a modal
+                    // here would take that back. It stays until a code exists, because the day it
+                    // stops being possible to issue one is the day it turns out to have been needed.
+                    if (!hasRecoveryCode && photos.isNotEmpty()) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.errorContainer,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp)
+                                .clickable { onOpenSecurity() }
+                        ) {
+                            Column(modifier = Modifier.padding(12.dp)) {
+                                Text(
+                                    "回復コードがまだありません",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                                Text(
+                                    "暗証番号を忘れると、写真を開く手立てがありません。" +
+                                        "ここを押して発行してください。",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onErrorContainer
+                                )
+                            }
+                        }
+                    }
+                    // No point offering a search box before there is anything to search.
+                    if (photos.isNotEmpty()) {
+                    OutlinedTextField(
+                        value = query,
+                        onValueChange = { viewModel.setQuery(it) },
+                        label = { Text("メモ・カテゴリを検索") },
+                        singleLine = true,
+                        leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
+                        trailingIcon = {
+                            if (query.isNotEmpty()) {
+                                IconButton(onClick = { viewModel.setQuery("") }) {
+                                    Icon(Icons.Filled.Close, contentDescription = "検索をやめる")
+                                }
+                            }
                         },
-                        style = MaterialTheme.typography.bodyLarge
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 8.dp)
                     )
+                    }
+                    }
                 }
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Adaptive(minSize = 150.dp),
-                    contentPadding = androidx.compose.foundation.layout.PaddingValues(8.dp),
-                    modifier = Modifier.fillMaxSize()
-                ) {
+                if (visiblePhotos.isEmpty()) {
+                    item(span = { GridItemSpan(maxLineSpan) }) {
+                        Box(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 80.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                when {
+                                    storageWarning != null -> "保存された記録の読み出しを完了できません"
+                                    query.isNotEmpty() && selectedCategory != null ->
+                                        "「$selectedCategory」の中に「$query」に当てはまる写真はありません"
+                                    query.isNotEmpty() -> "「$query」に当てはまる写真はありません"
+                                    selectedCategory != null -> "「$selectedCategory」の写真はまだありません"
+                                    else -> "写真がありません"
+                                },
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                    }
+                } else {
                     items(visiblePhotos, key = { it.id }) { item ->
                         PhotoCard(item = item, onClick = { onOpenPhoto(item.id) })
                     }
                 }
-            }
             }
         }
     }
@@ -628,6 +648,8 @@ private fun restoreResultMessage(outcome: BackupManager.RestoreOutcome): String 
     }
     BackupManager.RestoreOutcome.WrongPassphraseOrCorrupt ->
         "復元できませんでした。パスフレーズが違うか、ファイルが壊れています。"
+    BackupManager.RestoreOutcome.LocalStoreUnreadable ->
+        "保存された記録を読み出せないため、復元を中止しました。バックアップのパスフレーズはまだ確認していません。"
     BackupManager.RestoreOutcome.NotABackup ->
         "このファイルは暗号化バックアップではありません。"
     BackupManager.RestoreOutcome.EmptyBackup ->
