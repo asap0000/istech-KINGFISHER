@@ -25,7 +25,9 @@ import com.istech.privacycamera.crypto.ShortcutCipher
 import javax.crypto.Cipher
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -164,6 +166,29 @@ class VaultViewModel @JvmOverloads constructor(
     @Volatile
     private var lockRequestedWhileOpening = false
 
+    private var lockoutCountdown: Job? = null
+
+    init {
+        refreshLockoutCountdown()
+    }
+
+    /** Refresh the display until the persisted deadline expires; never unlocks the vault. */
+    fun refreshLockoutCountdown() {
+        lockoutCountdown?.cancel()
+        lockoutCountdown = null
+        _lockedOutFor.value = vault.nextAttemptAllowedIn()
+        if (_lockedOutFor.value <= 0L) return
+
+        lockoutCountdown = viewModelScope.launch {
+            while (true) {
+                val remaining = vault.nextAttemptAllowedIn()
+                _lockedOutFor.value = remaining
+                if (remaining <= 0L) break
+                delay(minOf(remaining, 250L))
+            }
+        }
+    }
+
     /**
      * True while an older library is still encrypted with the pre-vault key.
      *
@@ -194,6 +219,7 @@ class VaultViewModel @JvmOverloads constructor(
                 }
             }
             if (ok) {
+                refreshLockoutCountdown()
                 migrateThenOpen()
                 onDone(true)
             } else {
@@ -209,7 +235,7 @@ class VaultViewModel @JvmOverloads constructor(
         viewModelScope.launch {
             val waitFor = vault.nextAttemptAllowedIn()
             if (waitFor > 0) {
-                _lockedOutFor.value = waitFor
+                refreshLockoutCountdown()
                 return@launch
             }
             // Deriving the key takes long enough to leave on screen (PBKDF2, 120k rounds),
@@ -230,11 +256,11 @@ class VaultViewModel @JvmOverloads constructor(
                 openingInProgress = false
                 lockRequestedWhileOpening = false
                 _lastAttemptFailed.value = true
-                _lockedOutFor.value = vault.nextAttemptAllowedIn()
+                refreshLockoutCountdown()
                 return@launch
             }
             _lastAttemptFailed.value = false
-            _lockedOutFor.value = 0
+            refreshLockoutCountdown()
             session.open(key)
             refreshSealReady()
             migrateThenOpen()
@@ -302,7 +328,7 @@ class VaultViewModel @JvmOverloads constructor(
         viewModelScope.launch {
             val waitFor = vault.nextAttemptAllowedIn()
             if (waitFor > 0) {
-                _lockedOutFor.value = waitFor
+                refreshLockoutCountdown()
                 return@launch
             }
             // Same reason the passphrase path sets this: deriving the key takes long enough
@@ -320,11 +346,11 @@ class VaultViewModel @JvmOverloads constructor(
                 openingInProgress = false
                 lockRequestedWhileOpening = false
                 _recoveryFailed.value = true
-                _lockedOutFor.value = vault.nextAttemptAllowedIn()
+                refreshLockoutCountdown()
                 return@launch
             }
             _recoveryFailed.value = false
-            _lockedOutFor.value = 0
+            refreshLockoutCountdown()
             session.open(key)
             refreshSealReady()
             finishOpening(Stage.RECOVERING)
@@ -391,6 +417,7 @@ class VaultViewModel @JvmOverloads constructor(
         try {
             vault.changePassphrase(current, next)
         } finally {
+            refreshLockoutCountdown()
             current.fill(' ')
             next.fill(' ')
         }
@@ -415,6 +442,9 @@ class VaultViewModel @JvmOverloads constructor(
             }
             _hasRecoveryCode.value = false
             _sealReady.value = false
+            refreshLockoutCountdown()
+            _lastAttemptFailed.value = false
+            _recoveryFailed.value = false
             _stage.value = Stage.SETUP
             onDone()
         }

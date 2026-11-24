@@ -121,6 +121,20 @@ internal fun isGateCovered(
         (stage != VaultViewModel.Stage.OPEN && stage != VaultViewModel.Stage.LOCKED) ||
         (stage == VaultViewModel.Stage.LOCKED && (needsKey || !sealReady))
 
+/**
+ * Whether an unstored recovery code may be held (or handed over) now. Decided on the model's
+ * live stage, never on the copy a composition was drawn with: that copy can trail the model by
+ * a frame, and an effect keyed on a brief stage can run after the stage has moved on.
+ */
+internal fun keepsPendingCode(liveStage: VaultViewModel.Stage): Boolean =
+    liveStage == VaultViewModel.Stage.OPEN
+
+/** Whether a held recovery code is drawn: only when both the drawn and the live stage are OPEN. */
+internal fun showsPendingCode(
+    composedStage: VaultViewModel.Stage,
+    liveStage: VaultViewModel.Stage
+): Boolean = composedStage == VaultViewModel.Stage.OPEN && liveStage == VaultViewModel.Stage.OPEN
+
 /** The door a fresh arrival at the lock screen starts from: fingerprint if enrolled, else passphrase. */
 internal fun firstLockStep(hasShortcut: Boolean): LockStep =
     if (hasShortcut) LockStep.Fingerprint else LockStep.Passphrase
@@ -183,8 +197,31 @@ fun AppLockGate(
     // Anything that takes the vault out of OPEN — the app going to the background, an
     // auto-lock — clears a code that has not been stored yet. Leaving it on screen would draw
     // the one secret this app never shows twice over a lock screen the user just triggered.
+    //
+    // Decided on the model's live stage, not on [stage]. [stage] is the copy this composition
+    // was drawn with, and an effect keyed on a brief stage can start after the stage has
+    // already moved on. First setup passes through MIGRATING even for an empty library (no
+    // migrated marker yet, and again after a reset); when the MIGRATING effect ran only after
+    // setup had reached OPEN and handed over the code, it read the stale MIGRATING and threw
+    // the first-run recovery offer away. Seen on the OPPO (2026-11-25) as a first run that
+    // landed on the camera, unlocked, with no offer, in most runs but not all.
     LaunchedEffect(stage) {
-        if (stage != VaultViewModel.Stage.OPEN) pendingCode = null
+        if (!keepsPendingCode(liveStage = vaultModel.stage.value)) pendingCode = null
+    }
+
+    /**
+     * Hands the user a fresh recovery code, but only over an open vault.
+     *
+     * The code arrives from callbacks that can land after the vault has closed again: the
+     * fingerprint prompt is cancelled when the app goes to the background, and its callback
+     * comes after the lock. A code set then would be drawn over the lock screen, and storing it
+     * would fail with no key in hand while the screen still looked like success.
+     */
+    fun offerRecoveryCode() {
+        if (keepsPendingCode(liveStage = vaultModel.stage.value)) {
+            pendingCode = vaultModel.newRecoveryCode()
+            pendingCodeSkippable = true
+        }
     }
 
     // Every fresh arrival at the lock screen starts from the same door: fingerprint when one is
@@ -261,6 +298,7 @@ fun AppLockGate(
             when (event) {
                 // Nothing to do on start: the stage already says whether a key is held.
                 Lifecycle.Event.ON_START -> Unit
+                Lifecycle.Event.ON_RESUME -> vaultModel.refreshLockoutCountdown()
                 // Lock as early as ON_PAUSE — this fires BEFORE the system grabs the
                 // recents/overview snapshot, so the (possibly revealed) content is covered
                 // by the lock screen before it can leak into the task switcher. Skip it
@@ -348,8 +386,7 @@ fun AppLockGate(
                         // it would be read by nobody and then never shown again.
                         if (ok) {
                             enrollShortcutIfPossible(activity, vaultModel) {
-                                pendingCode = vaultModel.newRecoveryCode()
-                                pendingCodeSkippable = true
+                                offerRecoveryCode()
                             }
                         }
                     }
@@ -404,10 +441,7 @@ fun AppLockGate(
             VaultViewModel.Stage.RECOVERING -> RecoveryNewPassphraseScreen(
                 onSubmit = { next ->
                     vaultModel.finishRecovery(next) { ok ->
-                        if (ok) {
-                            pendingCode = vaultModel.newRecoveryCode()
-                            pendingCodeSkippable = true
-                        }
+                        if (ok) offerRecoveryCode()
                     }
                 }
             )
@@ -420,12 +454,28 @@ fun AppLockGate(
 
         // Drawn over everything, including the gallery: this is the one screen whose content
         // cannot be shown a second time, so it must not sit behind anything.
-        pendingCode?.let { code ->
+        // Only over an open vault, checked here as well as where the code is cleared: the
+        // clearing effect runs after the frame that first shows the vault closed, and for that
+        // frame the code would otherwise sit on top of the lock screen and in the
+        // accessibility tree.
+        val codeToShow = pendingCode.takeIf {
+            showsPendingCode(composedStage = stage, liveStage = vaultModel.stage.value)
+        }
+        codeToShow?.let { code ->
             RecoveryCodeIssueScreen(
                 code = code,
                 canSkip = pendingCodeSkippable,
                 onConfirmed = {
-                    vaultModel.storeRecoveryCode(code)
+                    // Closing on a failed store would leave the user holding paper that opens
+                    // nothing, believing it does. Say so, and point to where a new one is made.
+                    if (!vaultModel.storeRecoveryCode(code)) {
+                        android.widget.Toast.makeText(
+                            activity,
+                            "回復コードを保存できませんでした。このコードは使えません。" +
+                                "設定から新しいコードを発行してください",
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    }
                     pendingCode = null
                 },
                 onSkip = { pendingCode = null }

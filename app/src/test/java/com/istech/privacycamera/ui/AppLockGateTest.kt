@@ -21,9 +21,13 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.Snapshot
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
@@ -33,6 +37,7 @@ import com.istech.privacycamera.PrivacyCameraApplication
 import com.istech.privacycamera.testutil.SnapshotApplyRule
 import com.istech.privacycamera.ui.theme.PrivacyCameraTheme
 import com.istech.privacycamera.MainActivity
+import com.istech.privacycamera.viewmodel.VaultViewModel
 import java.io.File
 import org.junit.After
 import org.junit.Before
@@ -267,6 +272,134 @@ class AppLockGateTest {
 
         assertThat(hasEnabledBackCallback()).isFalse()
         assertThat(backCalls).isEqualTo(0)
+    }
+
+    // ---- 初回の回復コードの案内 --------------------------------------------------------------
+
+    private val offerSkip = "あとで（設定からいつでも発行できます）"
+
+    /** 初回設定の2欄に同じ暗証番号を入れて確定する。 */
+    private fun submitFirstPassphrase() {
+        val fields = compose.onAllNodes(hasSetTextAction())
+        fields[0].performTextInput("123456")
+        fields[1].performTextInput("123456")
+        settle()
+        compose.onNodeWithText("この暗証番号にする").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("この暗証番号にする").fetchSemanticsNodes().isEmpty()
+        }
+        settle()
+    }
+
+    @Test
+    fun `初めて暗証番号を決めると、移し替えの段を通っても回復コードの案内が出る`() {
+        // 新しい端末: 移し替え済みの目印が無いので、空の写真庫でも MIGRATING を通る。
+        assertThat(app.vaultSession.needsMigration()).isTrue()
+        needsKey = false
+        launchGate()
+
+        submitFirstPassphrase()
+
+        compose.onNodeWithText(offerSkip).assertExists()
+        compose.onNodeWithText(cameraText).assertDoesNotExist()
+    }
+
+    @Test
+    fun `案内を出したまま裏へ回ると、案内は消え、戻ってもロック画面の上に出ない`() {
+        needsKey = true
+        launchGate()
+        submitFirstPassphrase()
+        compose.onNodeWithText(offerSkip).assertExists()
+
+        scenario!!.moveToState(Lifecycle.State.CREATED)
+        scenario!!.moveToState(Lifecycle.State.RESUMED)
+        settle()
+
+        compose.onNodeWithText(offerSkip).assertDoesNotExist()
+        compose.onNodeWithText("回復コード").assertDoesNotExist()
+        compose.onNodeWithText("暗証番号で開けない").assertExists()
+    }
+
+    @Test
+    fun `全部消して作り直したあとも、回復コードの案内が出る`() {
+        needsKey = false
+        launchGate()
+        submitFirstPassphrase()
+        compose.onNodeWithText(offerSkip).performClick()
+        settle()
+        compose.onNodeWithText(offerSkip).assertDoesNotExist()
+
+        // 作り直し: 金庫を閉じて、ロック画面の「忘れた」から全部消す。
+        moveTo(true)
+        scenario!!.moveToState(Lifecycle.State.CREATED)
+        scenario!!.moveToState(Lifecycle.State.RESUMED)
+        settle()
+        compose.onNodeWithText("暗証番号で開けない").performClick()
+        settle()
+        compose.onNodeWithText("すべて消して作り直す").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText("この暗証番号にする").fetchSemanticsNodes().isNotEmpty()
+        }
+        assertThat(app.vaultSession.needsMigration()).isTrue()
+
+        submitFirstPassphrase()
+
+        compose.onNodeWithText(offerSkip).assertExists()
+    }
+
+    @Test
+    fun `回復コードで開いて暗証番号を決め直すと、移し替えの段を通っても新しい回復コードの案内が出る`() {
+        // RECOVERING → MIGRATING → OPEN の経路。移し替え済みの目印を置かないので MIGRATING を通る。
+        val key = app.vault.initialize(pin)
+        app.vaultSession.open(key)
+        app.vaultSession.ensureSealKeys()
+        val written = com.istech.privacycamera.crypto.RecoveryCode.generate()
+        app.vault.storeRecoveryCode(key, written)
+        app.vaultSession.close()
+        assertThat(app.vaultSession.needsMigration()).isTrue()
+        needsKey = true
+        launchGate()
+
+        compose.onNodeWithText("暗証番号で開けない").performClick()
+        settle()
+        compose.onAllNodes(hasSetTextAction())[0].performTextInput(written)
+        settle()
+        compose.onNodeWithText("開く").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodes(hasSetTextAction()).fetchSemanticsNodes().size == 2
+        }
+        val fields = compose.onAllNodes(hasSetTextAction())
+        fields[0].performTextInput("654321")
+        fields[1].performTextInput("654321")
+        settle()
+        compose.onNodeWithText("この暗証番号にする").performClick()
+        compose.waitUntil(timeoutMillis = 10_000) {
+            compose.onAllNodesWithText(offerSkip).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        compose.onNodeWithText(offerSkip).assertExists()
+        assertThat(app.vaultSession.needsMigration()).isFalse()
+    }
+
+    @Test
+    fun `未保存の回復コードは、描いた段が古くても生の段がOPENなら捨てない`() {
+        // 実機 OPPO（2026-11-25）で初回の案内が消えた順序: MIGRATING の効果が、setUp が OPEN に
+        // 着いてコードを渡した後に走った。旧実装は描いた段（MIGRATING）で判定して捨てていた。
+        // 判定は生の段だけを受け取る形にしたので、描いた段は入口から渡せない。
+        assertThat(keepsPendingCode(liveStage = VaultViewModel.Stage.OPEN)).isTrue()
+        VaultViewModel.Stage.entries.filter { it != VaultViewModel.Stage.OPEN }.forEach {
+            assertThat(keepsPendingCode(liveStage = it)).isFalse()
+        }
+    }
+
+    @Test
+    fun `未保存の回復コードは、描いた段と生の段の両方がOPENのときだけ描く`() {
+        VaultViewModel.Stage.entries.forEach { drawn ->
+            VaultViewModel.Stage.entries.forEach { live ->
+                val both = drawn == VaultViewModel.Stage.OPEN && live == VaultViewModel.Stage.OPEN
+                assertThat(showsPendingCode(composedStage = drawn, liveStage = live)).isEqualTo(both)
+            }
+        }
     }
 
     // ---- 扉の戻し --------------------------------------------------------------------------
