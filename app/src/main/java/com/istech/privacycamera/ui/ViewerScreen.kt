@@ -48,6 +48,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -62,6 +63,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.istech.privacycamera.auth.BiometricGate
+import com.istech.privacycamera.crypto.VaultClosedException
 import com.istech.privacycamera.data.AccessActions
 import com.istech.privacycamera.viewmodel.PhotoViewModel
 import kotlinx.coroutines.Dispatchers
@@ -87,9 +89,17 @@ fun ViewerScreen(
     val settingsRevealed by viewModel.settingsRevealed.collectAsState()
     val printEnabled by viewModel.printEnabled.collectAsState()
 
-    // The original is masked until the user passes device authentication.
-    var revealed by remember { mutableStateOf(false) }
-    var showNoAuthConfirm by remember { mutableStateOf(false) }
+    // The original is masked until the user passes device authentication, and only for the
+    // unlocked session it was revealed in: a lock in between — including the idle watchdog's,
+    // which does not pause the activity — puts the mask back, and revealing again takes a fresh,
+    // explicit choice ([LocalUnlockSession]). The same holds for the "continue without
+    // authentication" question: it does not carry over a lock either.
+    val unlockSession = LocalUnlockSession.current
+    val currentSession = rememberUpdatedState(unlockSession)
+    var revealedIn by remember { mutableStateOf<Any?>(null) }
+    var noAuthConfirmIn by remember { mutableStateOf<Any?>(null) }
+    val revealed = grantHolds(revealedIn, unlockSession)
+    val showNoAuthConfirm = grantHolds(noAuthConfirmIn, unlockSession)
     var showMemo by remember { mutableStateOf(false) }
 
     // Derive from the live list so caption/category edits reflect immediately.
@@ -98,8 +108,19 @@ fun ViewerScreen(
     val item = photos.firstOrNull { it.id == photoId }
 
     // Only decrypt the original into memory AFTER authentication succeeds.
+    // A lock that lands while the original is still being read closes the vault under the read;
+    // that is the read losing a race with the lock, not a broken photo, and the mask is what is
+    // shown next anyway. Without the catch it escaped the composition and ended the app.
     val originalBitmap by produceState<ImageBitmap?>(initialValue = null, photoId, revealed) {
-        value = if (revealed) viewModel.revealOriginal(photoId)?.asImageBitmap() else null
+        value = if (revealed) {
+            try {
+                viewModel.revealOriginal(photoId)?.asImageBitmap()
+            } catch (e: VaultClosedException) {
+                null
+            }
+        } else {
+            null
+        }
     }
     val maskedBitmap by produceState<ImageBitmap?>(initialValue = null, item?.maskedFile?.path) {
         value = item?.let {
@@ -118,7 +139,7 @@ fun ViewerScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE) revealed = false
+            if (event == Lifecycle.Event.ON_PAUSE) revealedIn = null
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -131,18 +152,23 @@ fun ViewerScreen(
             return
         }
         val cap = item?.caption.orEmpty()
+        // The session the user asked in. If the vault locks before the answer arrives, the
+        // answer belongs to a session that is over and reveals nothing.
+        val askedIn = unlockSession ?: return
         BiometricGate.authenticate(act) { result ->
             when (result) {
                 is BiometricGate.Result.Success -> {
-                    revealed = true
-                    viewModel.logAccess(photoId, AccessActions.REVEAL, cap, result.method.label)
+                    if (grantHolds(askedIn, currentSession.value)) {
+                        revealedIn = askedIn
+                        viewModel.logAccess(photoId, AccessActions.REVEAL, cap, result.method.label)
+                    }
                 }
                 is BiometricGate.Result.Failed ->
                     Toast.makeText(context, "認証に失敗しました", Toast.LENGTH_SHORT).show()
                 is BiometricGate.Result.NotConfigured -> {
                     // Nothing to verify against. This used to reveal behind a Toast that is
                     // gone in seconds; now the user is asked, and offered the way out.
-                    showNoAuthConfirm = true
+                    if (grantHolds(askedIn, currentSession.value)) noAuthConfirmIn = askedIn
                 }
             }
         }
@@ -152,8 +178,8 @@ fun ViewerScreen(
         NoAuthConfirmDialog(
             actionLabel = "正規表示",
             onProceed = {
-                showNoAuthConfirm = false
-                revealed = true
+                noAuthConfirmIn = null
+                revealedIn = unlockSession
                 // Recorded as "認証なし" so the log distinguishes this from a real reveal.
                 viewModel.logAccess(
                     photoId,
@@ -162,9 +188,9 @@ fun ViewerScreen(
                     BiometricGate.AuthMethod.NONE.label
                 )
             },
-            onDismiss = { showNoAuthConfirm = false },
+            onDismiss = { noAuthConfirmIn = null },
             onOpenSettings = {
-                showNoAuthConfirm = false
+                noAuthConfirmIn = null
                 if (!openSecuritySettings(context)) {
                     Toast.makeText(context, "設定画面を開けませんでした", Toast.LENGTH_SHORT).show()
                 }
@@ -204,7 +230,7 @@ fun ViewerScreen(
                         }
                     }
                     IconButton(onClick = {
-                        if (revealed) revealed = false else requestReveal()
+                        if (revealed) revealedIn = null else requestReveal()
                     }) {
                         Icon(
                             if (revealed) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,

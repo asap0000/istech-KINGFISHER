@@ -158,8 +158,10 @@ private fun CameraContent(
     // Keep the flash mode in sync with the capture use case.
     LaunchedEffect(flashMode) { imageCapture.flashMode = flashMode }
 
-    // (Re)bind the camera when the macro toggle changes.
+    // (Re)bind the camera when the macro toggle changes. Until a camera is bound again the
+    // shutter is greyed out (see [canPressShutter]); [camera] is what says it is bound.
     LaunchedEffect(macroOn) {
+        camera = null
         val provider = context.awaitCameraProvider()
         val preview = Preview.Builder().build().also {
             it.setSurfaceProvider(previewView.surfaceProvider)
@@ -268,9 +270,11 @@ private fun CameraContent(
                 .fillMaxWidth()
                 .padding(bottom = 48.dp)
         ) {
-            // Shutter is disabled while saving AND while a memo dialog is pending,
-            // which prevents an accidental second capture creating a stray photo.
-            val shutterEnabled = !isSaving && pendingMemo == null
+            val shutterEnabled = canPressShutter(
+                saving = isSaving,
+                memoPending = pendingMemo != null,
+                cameraBound = camera != null
+            )
             ShutterButton(
                 enabled = shutterEnabled,
                 modifier = Modifier.align(Alignment.Center)
@@ -321,6 +325,13 @@ private fun CameraContent(
 
                         override fun onError(exception: ImageCaptureException) {
                             isSaving = false
+                            // Never a silent press: nothing was taken, and saying so is what
+                            // tells the user to press again rather than look for a photo.
+                            Toast.makeText(
+                                context,
+                                "撮影できませんでした。もう一度シャッターを押してください",
+                                Toast.LENGTH_SHORT
+                            ).show()
                         }
                     }
                 )
@@ -484,6 +495,16 @@ private fun SaveLimitDialog(
         }
     )
 }
+
+/**
+ * Whether the shutter takes a press. Not while a capture is being saved, nor while its memo screen
+ * is up (either would make a stray second photo), nor before the camera is bound: a press then
+ * fails inside CameraX ("Not bound to a valid Camera") and used to do nothing at all, so right
+ * after setup — when the camera is still starting, about 3 s on an API 29 emulator — the first
+ * press looked ignored (2026-11-25, HP2 tour/releaseReview).
+ */
+internal fun canPressShutter(saving: Boolean, memoPending: Boolean, cameraBound: Boolean): Boolean =
+    !saving && !memoPending && cameraBound
 
 @Composable
 private fun ShutterButton(

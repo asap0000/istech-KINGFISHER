@@ -34,6 +34,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.LaunchedEffect
@@ -98,6 +100,29 @@ internal const val CAMERA_ROUTE = "camera"
  * needing the key, so the unknown case errs towards covering rather than showing.
  */
 internal fun routeNeedsKey(route: String?): Boolean = route != CAMERA_ROUTE
+
+/**
+ * The unlocked session the content is being shown in: a fresh object every time the vault
+ * reaches OPEN, and null whenever it is not open.
+ *
+ * Anything a screen grants on the strength of an unlock — the viewer's original — is tied to
+ * the session it was granted in, so any lock in between voids it: going to the background, a
+ * manual lock, and the idle watchdog, which locks without pausing the activity and so is not
+ * seen by a screen that only watches its lifecycle (2026-11-25: a revealed original came back
+ * after a foreground lock and a passphrase unlock). The content stays composed under the lock
+ * screen, so its own state survives a lock; this is what makes a grant not survive one.
+ *
+ * Outside a gate (previews, screen tests of a single screen) there is no lock to tie to, and
+ * the default stands for one session that never ends.
+ */
+val LocalUnlockSession = compositionLocalOf<Any?> { UngatedSession }
+
+/** The session outside any [AppLockGate]; see [LocalUnlockSession]. */
+internal object UngatedSession
+
+/** Whether a grant made in [grantedIn] still holds in [current]. Null on either side never holds. */
+internal fun grantHolds(grantedIn: Any?, current: Any?): Boolean =
+    grantedIn != null && current != null && grantedIn === current
 
 /**
  * Whether the lock layer must cover the app. One rule, used for both the opaque cover and the
@@ -187,6 +212,10 @@ fun AppLockGate(
         hasPendingCode = pendingCode != null
     )
     val onBackWhileLockedNow by rememberUpdatedState(onBackWhileLocked)
+    // Keyed on "is it open", so OPEN -> anything -> OPEN always yields a new session; decided in
+    // composition, with no effect in between that could run late.
+    val isOpen = stage == VaultViewModel.Stage.OPEN
+    val unlockSession = remember(isOpen) { if (isOpen) Any() else null }
 
     val lockState = when (stage) {
         VaultViewModel.Stage.OPEN -> LockState.UNLOCKED
@@ -360,7 +389,9 @@ fun AppLockGate(
                     }
                 }
         ) {
-            content()
+            CompositionLocalProvider(LocalUnlockSession provides unlockSession) {
+                content()
+            }
         }
 
         // Registered after the content on purpose: of the enabled back callbacks the one added
