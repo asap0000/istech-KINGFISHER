@@ -57,7 +57,13 @@ object MaskingEngine {
     /** The capture-time / Lite default: heavy whole-frame mosaic. */
     fun mask(source: Bitmap): Bitmap = render(source, MaskSpec())
 
-    /** Renders the masked bitmap for [source] according to [spec]. */
+    /**
+     * Renders the masked bitmap for [source] according to [spec].
+     *
+     * Ownership: [source] stays the caller's and is never recycled here (the mask editor keeps
+     * drawing it). The result is always a separate bitmap, never [source] itself, so the caller
+     * may recycle it independently.
+     */
     fun render(source: Bitmap, spec: MaskSpec): Bitmap {
         val w = source.width
         val h = source.height
@@ -94,7 +100,8 @@ object MaskingEngine {
         }
         val patch = scaleRegion(source, rect, columns, filter = style == MaskStyle.BLUR)
         canvas.drawBitmap(patch, rect.left.toFloat(), rect.top.toFloat(), copyPaint)
-        patch.recycle()
+        // The patch can be the source itself (see scaleRegion); the next region still reads it.
+        if (patch !== source) patch.recycle()
     }
 
     /**
@@ -108,9 +115,18 @@ object MaskingEngine {
         val smallH = (sub.height * scale).toInt().coerceAtLeast(1)
         val small = Bitmap.createScaledBitmap(sub, smallW, smallH, filter)
         val big = Bitmap.createScaledBitmap(small, sub.width, sub.height, filter)
-        if (sub != small) sub.recycle()
-        if (small != big) small.recycle()
-        return big
+        // createBitmap / createScaledBitmap hand back their input itself when nothing changes
+        // (an immutable bitmap asked for its own full frame, or for its own size). So [sub] can
+        // be the caller's [source] — for a whole-frame mask of a decoded photo it is — and
+        // recycling it destroyed a bitmap the caller still draws: the Pro mask editor shows its
+        // preview source again on 範囲指定 and crashed (2026-11-26, API 29). Recycle only the
+        // intermediates this function made and is not returning; never the caller's bitmap.
+        if (sub !== source && sub !== big) sub.recycle()
+        if (small !== source && small !== sub && small !== big) small.recycle()
+        // When nothing changed at all (coarseness at or above the photo's size) every step
+        // handed back the source. [render]'s callers own and recycle what it returns, so give
+        // them their own bitmap rather than the one they passed in.
+        return if (big === source) source.copy(source.config ?: Bitmap.Config.ARGB_8888, false) else big
     }
 
     private fun toPixelRect(r: MaskRegion, w: Int, h: Int): Rect? {

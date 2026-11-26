@@ -145,7 +145,10 @@ private fun AppNavHost(navController: NavHostController) {
             ViewerScreen(
                 photoId = id,
                 onBack = { navController.popBackStack() },
-                onDeleted = { navController.popBackStack() },
+                // Only from the photo's own screen, so one confirmed trash leaves exactly once.
+                onDeleted = {
+                    if (navController.currentBackStackEntry?.id == backStackEntry.id) navController.popBackStack()
+                },
                 onEdit = { navController.navigate(Routes.edit(id)) },
                 onMaskEdit = { navController.navigate(Routes.mask(id)) },
                 onOutputPrint = { navController.navigate(Routes.output(id)) },
@@ -163,10 +166,16 @@ private fun AppNavHost(navController: NavHostController) {
         }
         composable(Routes.MASK) { backStackEntry ->
             val id = backStackEntry.arguments?.getString("id").orEmpty()
+            // Leave only from the editor itself. A save finishes a moment after it is pressed,
+            // and the device's back button can already have closed the editor by then; popping
+            // again would take the photo's screen with it and land on the list.
+            val leaveEditor: () -> Unit = {
+                if (navController.currentBackStackEntry?.id == backStackEntry.id) navController.popBackStack()
+            }
             MaskEditScreen(
                 photoId = id,
-                onSaved = { navController.popBackStack() },
-                onCancel = { navController.popBackStack() },
+                onSaved = { leaveEditor() },
+                onCancel = { leaveEditor() },
                 viewModel = viewModel
             )
         }

@@ -434,10 +434,31 @@ class PhotoViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun loadMaskSpec(id: String): MaskingEngine.MaskSpec =
         withContext(Dispatchers.IO) { store.loadMaskSpec(id) }
 
-    /** Pro mask editing: regenerates the masked preview from the original using [spec]. */
-    fun applyMask(id: String, spec: MaskingEngine.MaskSpec, onDone: () -> Unit = {}) {
+    /**
+     * Pro mask editing: regenerates the masked preview from the original using [spec].
+     *
+     * Exactly one of [onDone] and [onFailed] runs, on the main thread. [onFailed] covers both a
+     * store that throws (the storage warning is still raised as before) and one that reports
+     * it could not read the original: that used to count as saved, so the editor closed and an
+     * edit was logged for a mask that had not been written.
+     */
+    fun applyMask(
+        id: String,
+        spec: MaskingEngine.MaskSpec,
+        onFailed: () -> Unit = {},
+        onDone: () -> Unit = {}
+    ) {
         viewModelScope.launch(storageFailureHandler) {
-            withContext(Dispatchers.IO) { store.applyMask(id, spec) }
+            val saved = try {
+                withContext(Dispatchers.IO) { store.applyMask(id, spec) }
+            } catch (e: Exception) {
+                if (e !is kotlinx.coroutines.CancellationException) onFailed()
+                throw e
+            }
+            if (!saved) {
+                onFailed()
+                return@launch
+            }
             refresh()
             onDone()
         }

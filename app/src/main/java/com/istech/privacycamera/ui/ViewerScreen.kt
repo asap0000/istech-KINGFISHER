@@ -106,6 +106,15 @@ fun ViewerScreen(
     val photos by viewModel.photos.collectAsState()
     val categories by viewModel.categories.collectAsState()
     val item = photos.firstOrNull { it.id == photoId }
+    // The trash question, tied to the photo and the unlocked session it was asked in. A lock
+    // in between (going home, the idle watchdog) or another photo on this screen voids it, so
+    // a confirmation can never land later on something the user did not ask about. Drawn only
+    // while it holds: a dialog is its own window and would otherwise sit over the lock screen.
+    var trashAsked by remember { mutableStateOf<TrashAsk?>(null) }
+    var trashed by remember(photoId) { mutableStateOf(false) }
+    val showTrashConfirm = trashAsked.let {
+        it != null && it.photoId == photoId && grantHolds(it.session, unlockSession) && item != null && !trashed
+    }
 
     // Only decrypt the original into memory AFTER authentication succeeds.
     // A lock that lands while the original is still being read closes the vault under the read;
@@ -172,6 +181,31 @@ fun ViewerScreen(
                 }
             }
         }
+    }
+
+    if (showTrashConfirm) {
+        ConfirmTrashDialog(
+            onConfirm = {
+                val ask = trashAsked
+                trashAsked = null
+                // Checked again at the moment of the answer, against the live session: the
+                // question can only ever move the photo it was asked about, and only once.
+                if (ask != null && !trashed && ask.photoId == photoId &&
+                    grantHolds(ask.session, currentSession.value) && item != null
+                ) {
+                    trashed = true
+                    viewModel.logAccess(photoId, AccessActions.DELETE, item.caption)
+                    viewModel.delete(photoId)
+                    Toast.makeText(
+                        context,
+                        "ゴミ箱に移動しました（30日間は復元できます）",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    onDeleted()
+                }
+            },
+            onDismiss = { trashAsked = null }
+        )
     }
 
     if (showNoAuthConfirm) {
@@ -253,15 +287,13 @@ fun ViewerScreen(
                     }) {
                         Icon(Icons.Filled.Save, contentDescription = "マスク版を書き出し")
                     }
+                    // Asks first (2026-11-26): this icon sits exactly where the mask editor's
+                    // 保存 is, so taps that kept coming after a save moved the photo to the trash
+                    // with no question asked. The answer is in the middle of the screen, well
+                    // away from that spot.
                     IconButton(onClick = {
-                        viewModel.logAccess(photoId, AccessActions.DELETE, item?.caption.orEmpty())
-                        viewModel.delete(photoId)
-                        Toast.makeText(
-                            context,
-                            "ゴミ箱に移動しました（30日間は復元できます）",
-                            Toast.LENGTH_SHORT
-                        ).show()
-                        onDeleted()
+                        val session = unlockSession
+                        if (session != null && item != null && !trashed) trashAsked = TrashAsk(photoId, session)
                     }) {
                         Icon(Icons.Filled.Delete, contentDescription = "削除")
                     }
@@ -318,4 +350,26 @@ fun ViewerScreen(
             }
         )
     }
+}
+
+/** A trash question: which photo, asked in which unlocked session. */
+internal data class TrashAsk(val photoId: String, val session: Any)
+
+/**
+ * "Move this photo to the trash?" The answer buttons are the dialog's own, in the middle of the
+ * screen, far from the top bar where both the viewer's 削除 and the mask editor's 保存 sit.
+ */
+@Composable
+internal fun ConfirmTrashDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("この写真をゴミ箱へ移しますか？") },
+        text = { Text("ゴミ箱からは30日間、もとに戻せます。") },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = onConfirm) { Text("ゴミ箱へ移す") }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("キャンセル") }
+        }
+    )
 }

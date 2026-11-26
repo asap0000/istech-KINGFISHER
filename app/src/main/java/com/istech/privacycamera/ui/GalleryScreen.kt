@@ -234,6 +234,18 @@ fun GalleryScreen(
     }
     var showCategoryCleanup by remember { mutableStateOf(false) }
 
+    // Back closes the open drawer and stays on this screen. Without this the press went past
+    // the drawer to the navigation's "pop one screen" and left the protected folder for the
+    // camera (2026-11-26, Pro tour on API 29/31/33/35). The plain ModalDrawerSheet used below
+    // installs no back handling of its own. Off while locked: this screen can be composed after
+    // the lock screen's own handler (it is reached by navigation), and the handler added last is
+    // asked first, so without the check a drawer left open under the lock screen would take the
+    // press that belongs to the lock screen. The unlock session is null exactly while locked.
+    val unlocked = LocalUnlockSession.current != null
+    BackHandler(enabled = unlocked && isDrawerOpenOrOpening(drawerState.currentValue, drawerState.targetValue)) {
+        scope.launch { drawerState.close() }
+    }
+
     ModalNavigationDrawer(
         drawerState = drawerState,
         drawerContent = {
@@ -1036,3 +1048,10 @@ private fun BlockingOverlay(content: @Composable ColumnScope.() -> Unit) {
         )
     }
 }
+
+/**
+ * Whether a back press belongs to the category drawer: it is open, or it is on its way open
+ * (a press during the slide-in would otherwise still go to the navigation and leave the screen).
+ */
+internal fun isDrawerOpenOrOpening(current: DrawerValue, target: DrawerValue): Boolean =
+    current == DrawerValue.Open || target == DrawerValue.Open

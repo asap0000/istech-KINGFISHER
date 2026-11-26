@@ -16,6 +16,7 @@
 package com.istech.privacycamera.ui
 
 import android.graphics.Bitmap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -96,14 +97,96 @@ fun MaskEditScreen(
         }
         return
     }
-    MaskEditor(
+    GuardedMaskEditor(
         original = orig,
         initial = saved,
-        onCancel = onCancel,
-        onSave = { spec ->
-            viewModel.applyMask(photoId, spec) {
+        save = { spec, failed, done ->
+            viewModel.applyMask(photoId, spec, onFailed = failed) {
                 viewModel.logAccess(photoId, AccessActions.EDIT, "mask")
-                onSaved()
+                done()
+            }
+        },
+        onSaved = onSaved,
+        onCancel = onCancel
+    )
+}
+
+/**
+ * One save at a time, and one way out of the editor.
+ *
+ * Pressing 保存 twice in quick succession used to save twice: two edits in the access log,
+ * and two completions each popping a screen, so the user landed on the list instead of back
+ * on the photo (検査場 HP2, 2026-11-26: 24/24 on API 29-35, and the same before the drawer
+ * fix). A press while a save is in flight is ignored; a failed save lets the next press try
+ * again; and whichever of "saved" and "cancelled" comes first is the only one that leaves.
+ */
+internal class SaveOnce {
+    var saving by mutableStateOf(false)
+        private set
+    var failed by mutableStateOf(false)
+        private set
+    private var left = false
+
+    /** True when this press may start a save. */
+    fun begin(): Boolean {
+        if (saving || left) return false
+        saving = true
+        failed = false
+        return true
+    }
+
+    /** The save did not happen; the next press may try again. */
+    fun fail() {
+        saving = false
+        failed = true
+    }
+
+    /** The save is done; true only if the editor should now be left (once). */
+    fun finish(): Boolean {
+        saving = false
+        return leave()
+    }
+
+    /** True the first time only: the one transition out of the editor. */
+    fun leave(): Boolean {
+        if (left) return false
+        left = true
+        return true
+    }
+}
+
+/**
+ * [MaskEditor] behind [SaveOnce]. [save] does the work and calls exactly one of its two
+ * callbacks: the failure one, or the success one.
+ */
+@Composable
+internal fun GuardedMaskEditor(
+    original: Bitmap,
+    initial: MaskSpec,
+    save: (spec: MaskSpec, onFailed: () -> Unit, onDone: () -> Unit) -> Unit,
+    onSaved: () -> Unit,
+    onCancel: () -> Unit
+) {
+    val gate = remember { SaveOnce() }
+    // While a save is in flight the device's back goes through the same single exit as the
+    // cancel button. Left to the navigation, a back pressed just after 保存 started its own
+    // pop while the finishing save popped too: on API 35 the app crashed ("Cannot transition
+    // entry that is not in the back stack"), on API 33 it landed on the list (2026-11-26). Off
+    // while locked: over the lock screen the press belongs to the lock screen's own handler,
+    // which this one, registered later, would otherwise outrank.
+    val unlocked = LocalUnlockSession.current != null
+    BackHandler(enabled = unlocked && gate.saving) {
+        if (gate.leave()) onCancel()
+    }
+    MaskEditor(
+        original = original,
+        initial = initial,
+        saving = gate.saving,
+        saveFailed = gate.failed,
+        onCancel = { if (gate.leave()) onCancel() },
+        onSave = { spec ->
+            if (gate.begin()) {
+                save(spec, { gate.fail() }, { if (gate.finish()) onSaved() })
             }
         }
     )
@@ -114,6 +197,8 @@ fun MaskEditScreen(
 private fun MaskEditor(
     original: Bitmap,
     initial: MaskSpec,
+    saving: Boolean,
+    saveFailed: Boolean,
     onSave: (MaskSpec) -> Unit,
     onCancel: () -> Unit
 ) {
@@ -158,7 +243,7 @@ private fun MaskEditor(
                     }) {
                         Icon(Icons.Filled.Refresh, contentDescription = "リセット")
                     }
-                    IconButton(onClick = { onSave(currentSpec()) }) {
+                    IconButton(onClick = { onSave(currentSpec()) }, enabled = !saving) {
                         Icon(Icons.Filled.Check, contentDescription = "保存")
                     }
                 }
@@ -170,6 +255,14 @@ private fun MaskEditor(
                 .fillMaxSize()
                 .padding(padding)
         ) {
+            if (saveFailed) {
+                Text(
+                    "保存できませんでした。もう一度「保存」を押してください。",
+                    color = MaterialTheme.colorScheme.error,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+                )
+            }
             BoxWithConstraints(
                 modifier = Modifier
                     .fillMaxWidth()
