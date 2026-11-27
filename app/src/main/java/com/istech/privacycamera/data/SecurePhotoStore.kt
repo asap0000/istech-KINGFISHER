@@ -1001,13 +1001,17 @@ class SecurePhotoStore(
         var done = 0
         for (file in files) {
             try {
-                val plain = decryptAny(file.readBytes())
-                val tmp = File(file.parentFile, "${file.name}.rewrap.${System.nanoTime()}")
-                tmp.writeBytes(encryptNew(plain))
-                if (!tmp.renameTo(file)) {
-                    file.writeBytes(tmp.readBytes())
+                // One file at a time under the lock every reader of the library holds, and
+                // moved into place in one step like every other write here. Before, the
+                // rewrap ran outside the lock and fell back to copying over the record where
+                // a rename cannot replace (a Windows JVM): the photo list's first read after
+                // unlock, which runs alongside this, could then see a record half written,
+                // count the photo as unreadable and show none - and nothing read again once
+                // the rewrap was done (2026-11-27). Readers now wait for the one file instead.
+                synchronized(stateLock) {
+                    val plain = decryptAny(file.readBytes())
+                    writeAtomically(file) { encryptNew(plain) }
                 }
-                tmp.delete()
                 done++
             } catch (e: Exception) {
                 // Unreadable under either key: leave it exactly as it is. Overwriting it

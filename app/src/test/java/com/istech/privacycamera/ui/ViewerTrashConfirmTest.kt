@@ -88,11 +88,16 @@ class ViewerTrashConfirmTest {
         ui.onAllNodesWithText(text).fetchSemanticsNodes().isEmpty()
     }
 
+
+    // The photo's state is told by its frame (no title any more): matched by the frame's state.
+    private fun stateIs(state: String) =
+        androidx.compose.ui.test.SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, state)
+    private fun waitState(state: String) = ui.waitUntil(10_000) { ui.onAllNodes(stateIs(state)).fetchSemanticsNodes().isNotEmpty() }
     private fun unlock(passphrase: String) {
         waitText("ロックされています")
         ui.onNode(hasSetTextAction()).performTextInput(passphrase)
         ui.onNodeWithText("開く").performClick()
-        waitText("マスク表示")
+        waitState(PhotoFrame.STATE_MASK)
         // The photo itself is on screen (the list has loaded): 削除 only asks about a shown photo.
         ui.waitUntil(10_000) { ui.onAllNodesWithContentDescription("マスク済み").fetchSemanticsNodes().isNotEmpty() }
         ui.waitForIdle()
@@ -119,7 +124,7 @@ class ViewerTrashConfirmTest {
             assertEquals(1, photos())
             assertEquals(0, trash())
             assertEquals(0, left)
-            ui.onNodeWithText("マスク表示").assertExists()
+            ui.onNode(stateIs(PhotoFrame.STATE_MASK)).assertExists()
         }
     }
 

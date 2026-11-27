@@ -48,10 +48,16 @@ private const val DOUBLE_TAP_ZOOM = 2.5f
 fun ZoomableImage(
     bitmap: ImageBitmap,
     contentDescription: String?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /**
+     * What the zoom belongs to. The photo screen passes the photo, so switching between the
+     * mask and the original (same picture, same size) keeps the zoom and position where they
+     * were instead of jumping back to the whole picture.
+     */
+    resetKey: Any? = bitmap
 ) {
-    var scale by remember(bitmap) { mutableFloatStateOf(1f) }
-    var offset by remember(bitmap) { mutableStateOf(Offset.Zero) }
+    var scale by remember(resetKey) { mutableFloatStateOf(1f) }
+    var offset by remember(resetKey) { mutableStateOf(Offset.Zero) }
 
     BoxWithConstraints(modifier, contentAlignment = Alignment.Center) {
         val maxW = constraints.maxWidth.toFloat()
@@ -72,14 +78,14 @@ fun ZoomableImage(
             contentScale = ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()
-                .pointerInput(bitmap) {
+                .pointerInput(resetKey) {
                     detectTransformGestures { _, pan, zoom, _ ->
                         val newScale = (scale * zoom).coerceIn(1f, MAX_ZOOM)
                         scale = newScale
                         offset = clampOffset(offset + pan, newScale)
                     }
                 }
-                .pointerInput(bitmap) {
+                .pointerInput(resetKey) {
                     detectTapGestures(
                         onDoubleTap = {
                             if (scale > 1f) {

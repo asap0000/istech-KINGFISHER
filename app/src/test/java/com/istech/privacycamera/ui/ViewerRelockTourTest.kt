@@ -54,8 +54,10 @@ class ViewerRelockTourTest {
                     }
                 }
             }
+            // A text on the lock screen, or the photo frame's state on the viewer.
             fun waitTitle(title: String) = ui.waitUntil(10000) {
-                ui.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty()
+                ui.onAllNodesWithText(title).fetchSemanticsNodes().isNotEmpty() ||
+                ui.onAllNodes(androidx.compose.ui.test.SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, title)).fetchSemanticsNodes().isNotEmpty()
             }
             fun unlock() {
                 waitTitle("ロックされています")
@@ -63,10 +65,10 @@ class ViewerRelockTourTest {
                 ui.onNodeWithText("開く").performClick()
             }
             unlock()
-            waitTitle("マスク表示")
+            waitTitle(PhotoFrame.STATE_MASK)
             ui.onNodeWithContentDescription("認証して正規表示").performClick()
             ui.onNodeWithText("このまま続ける").performClick()
-            waitTitle("正規表示（アプリ内のみ）")
+            waitTitle(PhotoFrame.STATE_ORIGINAL)
             // Same lock operation as the idle watchdog, without advancing the Android lifecycle.
             scenario.onActivity { ViewModelProvider(it)[VaultViewModel::class.java].lock() }
             waitTitle("ロックされています")
@@ -74,10 +76,10 @@ class ViewerRelockTourTest {
             unlock()
             ui.waitUntil(10000) { ui.onAllNodesWithText("ロックされています").fetchSemanticsNodes().isEmpty() }
             ui.waitForIdle()
-            val revealed = ui.onAllNodesWithText("正規表示（アプリ内のみ）").fetchSemanticsNodes().isNotEmpty()
+            val revealed = ui.onAllNodes(androidx.compose.ui.test.SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, PhotoFrame.STATE_ORIGINAL)).fetchSemanticsNodes().isNotEmpty()
             val original = ui.onAllNodesWithContentDescription("正規の内容").fetchSemanticsNodes().isNotEmpty()
             check(!revealed && !original) { "foreground relock followed by PIN unlock retained original title=$revealed and original image node=$original" }
-            ui.onNodeWithText("マスク表示").assertExists()
+            ui.onNode(androidx.compose.ui.test.SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, PhotoFrame.STATE_MASK)).assertExists()
         }
     }
 

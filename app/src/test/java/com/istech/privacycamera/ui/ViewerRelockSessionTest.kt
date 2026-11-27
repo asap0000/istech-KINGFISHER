@@ -97,13 +97,18 @@ class ViewerRelockSessionTest {
         ui.onAllNodesWithText(text).fetchSemanticsNodes().isNotEmpty()
     }
 
+
+    // The photo's state is told by its frame (no title any more): matched by the frame's state.
+    private fun stateIs(state: String) =
+        androidx.compose.ui.test.SemanticsMatcher.expectValue(androidx.compose.ui.semantics.SemanticsProperties.StateDescription, state)
+    private fun waitState(state: String) = ui.waitUntil(10_000) { ui.onAllNodes(stateIs(state)).fetchSemanticsNodes().isNotEmpty() }
     private fun unlock(passphrase: String) {
         waitText("ロックされています")
         ui.onNode(hasSetTextAction()).performTextInput(passphrase)
         ui.onNodeWithText("開く").performClick()
         // Every unlock here lands on the viewer; its title is only readable once the cover is off.
         // A revealed title would not match, so a reveal that survived the lock fails right here.
-        waitText("マスク表示")
+        waitState(PhotoFrame.STATE_MASK)
         ui.waitForIdle()
     }
 
@@ -114,7 +119,7 @@ class ViewerRelockSessionTest {
     }
 
     private fun originalShown(): Boolean =
-        ui.onAllNodesWithText("正規表示（アプリ内のみ）").fetchSemanticsNodes().isNotEmpty() ||
+        ui.onAllNodes(stateIs(PhotoFrame.STATE_ORIGINAL)).fetchSemanticsNodes().isNotEmpty() ||
             ui.onAllNodesWithContentDescription("正規の内容").fetchSemanticsNodes().isNotEmpty()
 
     @Test fun afterAForegroundRelockTheOriginalTakesAFreshExplicitReveal() {
@@ -123,20 +128,20 @@ class ViewerRelockSessionTest {
             unlock(fixture.passphrase)
             ui.onNodeWithContentDescription("認証して正規表示").performClick()
             ui.onNodeWithText("このまま続ける").performClick()
-            waitText("正規表示（アプリ内のみ）")
+            waitState(PhotoFrame.STATE_ORIGINAL)
 
             foregroundLock(scenario)
             assertFalse("original readable under the lock screen", originalShown())
 
             unlock(fixture.passphrase)
             assertFalse("original came back without being asked for", originalShown())
-            ui.onNodeWithText("マスク表示").assertExists()
+            ui.onNode(stateIs(PhotoFrame.STATE_MASK)).assertExists()
             ui.onNodeWithContentDescription("マスク済み").assertExists()
 
             // Asking again, explicitly, still works.
             ui.onNodeWithContentDescription("認証して正規表示").performClick()
             ui.onNodeWithText("このまま続ける").performClick()
-            waitText("正規表示（アプリ内のみ）")
+            waitState(PhotoFrame.STATE_ORIGINAL)
             ui.waitUntil(10_000) {
                 ui.onAllNodesWithContentDescription("正規の内容").fetchSemanticsNodes().isNotEmpty()
             }
@@ -158,7 +163,7 @@ class ViewerRelockSessionTest {
             unlock(fixture.passphrase)
             ui.onAllNodesWithText("このまま続ける").assertCountEquals(0)
             assertFalse(originalShown())
-            ui.onNodeWithText("マスク表示").assertExists()
+            ui.onNode(stateIs(PhotoFrame.STATE_MASK)).assertExists()
         }
     }
 
@@ -182,9 +187,9 @@ class ViewerRelockSessionTest {
             unlock(fixture.passphrase)
             ui.onNodeWithContentDescription("認証して正規表示").performClick()
             ui.onNodeWithText("このまま続ける").performClick()
-            waitText("正規表示（アプリ内のみ）")
+            waitState(PhotoFrame.STATE_ORIGINAL)
             ui.onNodeWithContentDescription("マスクに戻す").performClick()
-            waitText("マスク表示")
+            waitState(PhotoFrame.STATE_MASK)
             assertFalse(originalShown())
         }
     }

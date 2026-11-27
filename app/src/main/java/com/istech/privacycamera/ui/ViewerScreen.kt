@@ -28,12 +28,15 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Brush
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Print
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -56,6 +59,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
@@ -101,6 +105,20 @@ fun ViewerScreen(
     val revealed = grantHolds(revealedIn, unlockSession)
     val showNoAuthConfirm = grantHolds(noAuthConfirmIn, unlockSession)
     var showMemo by remember { mutableStateOf(false) }
+    // The editing actions that only exist while the original is shown. On the narrowest screens
+    // (Pro, 320dp: six icons) they would cover the back button and leave the title no width at
+    // all, so the "正規表示（アプリ内のみ）" notice disappeared. There they go behind one
+    // "その他の操作" button instead; the icons right of it (表示の切替・書き出し・削除) keep
+    // their places, so 削除 stays where it was.
+    val canPrint = com.istech.privacycamera.Tier.isPro && settingsRevealed && printEnabled
+    val editActionCount = if (!revealed) 0 else 1 + (if (com.istech.privacycamera.Tier.isPro) 1 else 0) + (if (canPrint) 1 else 0)
+    val collapseEdits = editActionCount > 1 &&
+        viewerBarNeedsOverflow(LocalConfiguration.current.screenWidthDp, iconCount = 4 + editActionCount)
+    // Starts closed with every reveal. A plain remember outlived the reveal: the menu was left
+    // open, the lock (or any pause) took the reveal away and hid the menu without closing it,
+    // and the next reveal - asked for again by the user - showed it open untouched (HP2,
+    // 2026-11-27: API 29/35, home and screen off, 4/4; closed before the lock, 0/2).
+    var editMenuOpen by remember(revealed) { mutableStateOf(false) }
 
     // Derive from the live list so caption/category edits reflect immediately.
     val photos by viewModel.photos.collectAsState()
@@ -235,7 +253,10 @@ fun ViewerScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(if (revealed) "正規表示（アプリ内のみ）" else "マスク表示") },
+                // No title: on a phone the bar has no room left for one, and a cut-off fragment
+                // tells nobody anything. What is on screen is told by the photo's frame instead
+                // (2026-11-27, owner: "UIUXは基本その方向で").
+                title = {},
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "戻る")
@@ -246,7 +267,36 @@ fun ViewerScreen(
                         Icon(Icons.Filled.Edit, contentDescription = "メモを編集")
                     }
                     // Image editing requires the original, so only after reveal.
-                    if (revealed) {
+                    if (revealed && collapseEdits) {
+                        Box {
+                            IconButton(onClick = { editMenuOpen = true }) {
+                                Icon(Icons.Filled.MoreVert, contentDescription = "その他の操作")
+                            }
+                            // A menu is a window of its own: shown only while the original is,
+                            // so a lock in between never leaves it over the lock screen.
+                            DropdownMenu(expanded = editMenuOpen && revealed, onDismissRequest = { editMenuOpen = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("画像を編集") },
+                                    leadingIcon = { Icon(Icons.Filled.Tune, contentDescription = null) },
+                                    onClick = { editMenuOpen = false; onEdit(photoId) }
+                                )
+                                if (com.istech.privacycamera.Tier.isPro) {
+                                    DropdownMenuItem(
+                                        text = { Text("マスクを編集") },
+                                        leadingIcon = { Icon(Icons.Filled.Brush, contentDescription = null) },
+                                        onClick = { editMenuOpen = false; onMaskEdit(photoId) }
+                                    )
+                                }
+                                if (canPrint) {
+                                    DropdownMenuItem(
+                                        text = { Text("提出用に印刷") },
+                                        leadingIcon = { Icon(Icons.Filled.Print, contentDescription = null) },
+                                        onClick = { editMenuOpen = false; onOutputPrint(photoId) }
+                                    )
+                                }
+                            }
+                        }
+                    } else if (revealed) {
                         IconButton(onClick = { onEdit(photoId) }) {
                             Icon(Icons.Filled.Tune, contentDescription = "画像を編集")
                         }
@@ -257,7 +307,7 @@ fun ViewerScreen(
                             }
                         }
                         // Submission-print: hidden feature, Pro-only, must be revealed+enabled.
-                        if (com.istech.privacycamera.Tier.isPro && settingsRevealed && printEnabled) {
+                        if (canPrint) {
                             IconButton(onClick = { onOutputPrint(photoId) }) {
                                 Icon(Icons.Filled.Print, contentDescription = "提出用に印刷")
                             }
@@ -307,11 +357,16 @@ fun ViewerScreen(
                 .padding(padding),
             contentAlignment = Alignment.Center
         ) {
-            val shown = if (revealed) originalBitmap else maskedBitmap
+            // The frame follows what is actually drawn, not what was asked for: until the
+            // original has been read, the mask stays on screen with the mask's frame.
+            val showingOriginal = revealed && originalBitmap != null
+            val shown = if (showingOriginal) originalBitmap else maskedBitmap
             if (shown != null) {
-                ZoomableImage(
+                FramedPhoto(
                     bitmap = shown,
-                    contentDescription = if (revealed) "正規の内容" else "マスク済み",
+                    original = showingOriginal,
+                    contentDescription = if (showingOriginal) "正規の内容" else "マスク済み",
+                    zoomKey = photoId,
                     modifier = Modifier.fillMaxSize()
                 )
             } else {
@@ -373,3 +428,12 @@ internal fun ConfirmTrashDialog(onConfirm: () -> Unit, onDismiss: () -> Unit) {
         }
     )
 }
+
+/**
+ * Whether the photo screen's top bar has to fold its editing actions into a menu: the back
+ * button (and its insets, 60dp) plus [iconCount] 48dp icons must leave the title at least 12dp.
+ * Measured on the emulators (2026-11-27): Pro revealed at 360dp (6 icons) keeps a 16dp title and
+ * an intact back button; at 320dp the icons ran over the back button and the title had no width.
+ */
+internal fun viewerBarNeedsOverflow(screenWidthDp: Int, iconCount: Int): Boolean =
+    60 + iconCount * 48 + 12 > screenWidthDp
